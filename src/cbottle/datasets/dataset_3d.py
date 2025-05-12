@@ -400,7 +400,7 @@ def _get_dataset_icon(
         ),
         ZarrLoader(
             path=config.RAW_DATA_URL_6,
-            storage_options=get_storage_options("pbss"),
+            storage_options=get_storage_options(config.RAW_DATA_PROFILE),
             levels=[],
             variables_3d=[],
             variables_2d=[
@@ -420,7 +420,7 @@ def _get_dataset_icon(
         ),
         ZarrLoader(
             path=config.SST_MONMEAN_DATA_URL_6,
-            storage_options=get_storage_options("pbss"),
+            storage_options=get_storage_options(config.SST_MONMEAN_DATA_PROFILE),
             levels=[],
             variables_3d=[],
             variables_2d=["ts_monmean"],
@@ -437,8 +437,8 @@ def _get_dataset_icon(
 
     # open land data
     land_data = zarr.open_group(
-        f"s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_{HPX_LEVEL}.zarr",
-        storage_options=get_storage_options("pbss"),
+        config.LAND_DATA_URL_6,
+        storage_options=get_storage_options(config.LAND_DATA_PROFILE),
     )
     land_fraction = land_data["land_fraction"][:]
 
