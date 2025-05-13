@@ -13,3 +13,7 @@ Pull the cbottle container using
 shifterimg pull registry.nersc.gov/m4935/cbottle
 ```
 
+Launch a coarse res generation batch job using the submission script:
+```bash
+sbatch -A <ACCOUNT> scripts/nersc/submit_coarse_inference.sh
+```
