@@ -530,9 +530,10 @@ def _get_dataset_era5(
     time_length: int = 1,
     frame_masker: Optional[Callable] = None,
 ):
+
     target_data_loader = ZarrLoader(
         path=config.V6_ERA5_ZARR,
-        storage_options=get_storage_options("pdx"),
+        storage_options=config.V6_ERA5_ZARR_PROFILE,
         variables_3d=["u", "v", "t", "z"],
         variables_2d=[
             "sstk",
@@ -557,7 +558,7 @@ def _get_dataset_era5(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
         loaders.append(
-            AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))
+            AmipSSTDataset(grid, storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE))
         )
 
     metadata = DATASET_METADATA["era5"]
@@ -678,7 +679,7 @@ def get_amip_dataset(
     grid = earth2grid.healpix.Grid(
         HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
     )
-    loaders = [AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))]
+    loaders = [AmipSSTDataset(grid, storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE))]
     encode_frame = functools.partial(
         _encode_amip, label=LABELS.index("era5"), mask=mask
     )

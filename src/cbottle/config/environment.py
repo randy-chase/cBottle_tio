@@ -23,6 +23,7 @@ SUBMIT_SCRIPT = os.getenv("SUBMIT_SCRIPT", "../../ord_scripts/submit_ord.sh")
 
 # data
 V6_ERA5_ZARR = os.getenv("V6_ERA5_ZARR", "/global/cfs/cdirs/trn006/data/nvidia/era5_hpx_6.zarr/")
+V6_ERA5_ZARR_PROFILE = os.getenv("V6_ERA5_ZARR_PROFILE", "")
 RAW_DATA_URL_7 = "s3://ICON_cycle3_ngc3028/ngc3028_PT30M_7.zarr/"
 RAW_DATA_URL_6 = os.getenv(
     "RAW_DATA_URL_6", "/global/cfs/cdirs/trn006/data/nvidia/ngc3028_PT30M_6.zarr/"
@@ -65,6 +66,7 @@ AMIP_MID_MONTH_SST = os.getenv(
     "AMIP_MID_MONTH_SST",
     "s3://input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
 )
+AMIP_MID_MONTH_SST_PROFILE = os.getenv("AMIP_MID_MONTH_SST_PROFILE", "pbss")
 
 # project file
 PROJECT_ROOT = os.getenv(
