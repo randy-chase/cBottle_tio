@@ -5,7 +5,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
-#SBATCH --constraint=gpu
+#SBATCH --constraint=gpu&hbm80g
 #SBATCH --module=gpu,nccl-plugin
 #SBATCH --image=registry.nersc.gov/m4935/cbottle
 #SBATCH -o cBottle_training_2node_%j.out 
