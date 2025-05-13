@@ -14,7 +14,7 @@
 
 set -x
 
-# run training job
+# run inference job
 ROOT=$(git rev-parse --show-toplevel)
 cd ${ROOT}
 srun --nodes 1 --ntasks-per-node 1 --gpus-per-node 1 shifter \
