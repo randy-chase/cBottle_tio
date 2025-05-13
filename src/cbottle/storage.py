@@ -23,6 +23,8 @@ class StorageConfigError(Exception):
 
 
 def get_storage_options(remote_name, config_path=DEFAULT_PATH):
+    if not remote_name:
+        return None
     # Parse the rclone config file
     config = configparser.ConfigParser()
     config.read(config_path)
