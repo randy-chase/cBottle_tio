@@ -15,13 +15,14 @@
 set -x
 
 # run training job
-cd /pscratch/sd/a/akshay13/cBottle/
+ROOT=$(git rev-parse --show-toplevel)
+cd ${ROOT}
 srun --nodes 1 --ntasks-per-node 1 --gpus-per-node 1 shifter \
     bash -c "
     unset NCCL_CROSS_NIC
     pip install -e .
     python scripts/inference_coarse.py \
-        /global/cfs/cdirs/m4331/tge/cBottle-3d.zip \
+        /global/cfs/cdirs/trn006/data/nvidia/cBottle/cBottle-3d.zip \
         inference_output \
         --sample.min_samples 1
     "
