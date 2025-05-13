@@ -1,0 +1,1 @@
+srun --nodes 1 --qos interactive --time 04:00:00 -C 'gpu&hbm80g' --gpus 1 --account=trn006  --pty /bin/bash
