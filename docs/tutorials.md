@@ -165,6 +165,7 @@ def dataset_wrapper(*, split: str = ""):
     train_times = valid_times[:int(len(valid_times) * 0.75)]
     test_times = valid_times[-1:]
     times = {"train": train_times, "test": test_times, "": valid_times}[split]
+    chunk_size = {"train": 48, "test": 1, "": 1}[split]
 
     if times.size == 0:
         raise RuntimeError("No times are selected.")
@@ -173,11 +174,11 @@ def dataset_wrapper(*, split: str = ""):
         times,
         time_loaders=loaders,
         transform=encode_task,
-        chunk_size=48,
+        chunk_size=chunk_size,
         shuffle=True
     )
 
-    # Required metadata for training
+    # Additional metadata required for training
     dataset.grid = healpix.Grid(level=10, pixel_order=healpix.PixelOrder.NEST)
     dataset.fields_out = variable_list_2d
 
