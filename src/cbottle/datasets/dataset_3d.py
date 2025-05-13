@@ -532,7 +532,7 @@ def _get_dataset_era5(
 ):
     target_data_loader = ZarrLoader(
         path=config.V6_ERA5_ZARR,
-        storage_options=get_storage_options("pdx"),
+        storage_options=config.V6_ERA5_ZARR_PROFILE,
         variables_3d=["u", "v", "t", "z"],
         variables_2d=[
             "sstk",
