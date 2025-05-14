@@ -74,7 +74,9 @@ AMIP_MID_MONTH_SST = os.getenv(
 AMIP_MID_MONTH_SST_PROFILE = os.getenv("AMIP_MID_MONTH_SST_PROFILE", "pbss")
 
 # project file
-PROJECT_ROOT = os.getenv("PROJECT_ROOT", "/global/cfs/cdirs/m4331/tge/cBottle_video/")
+PROJECT_ROOT = os.getenv(
+    "PROJECT_ROOT", "/global/cfs/cdirs/trn006/data/nvidia/cBottle/"
+)
 DATA_ROOT = os.getenv("DATA_ROOT", os.path.join(PROJECT_ROOT, "datasets"))
 CHECKPOINT_ROOT = os.getenv(
     "CHECKPOINT_ROOT", os.path.join(PROJECT_ROOT, "training-runs")
