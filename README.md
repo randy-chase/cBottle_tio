@@ -21,7 +21,7 @@ python3 scripts/train_coarse.py --loop.noise_distribution log_uniform --loop.sig
 
 ### Inference
 
-AMIP SST data must be provided as a conditioning input to inference the coarse models. First run `python3 scripts/download_amip_sst.py` to download the data, and then configure `AMIP_MID_MONTH_SST` and `AMIP_MID_MONTH_SST_PROFILE` accordingly to point to the downloaded data in `src/cbottle/config/environment.py`.
+AMIP SST data must be provided as a conditioning input to inference the coarse models. First run `python3 scripts/download_amip_sst.py` to download the data, and then configure `AMIP_MID_MONTH_SST` and `AMIP_MID_MONTH_SST_PROFILE` in `src/cbottle/config/environment.py` to point to the downloaded data.
 
 Once the AMIP SST data is configured, see `scripts/inference_coarse.py`.
 
