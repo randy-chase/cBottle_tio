@@ -21,7 +21,7 @@ sbatch -A <ACCOUNT> scripts/nersc/submit_coarse_inference.sh
 ## Training quickstart (NERSC)
 
 Prerequisites: 
-- [install cBottle](../../docs/installation.md)
+- [install cBottle](./installation.md)
 - Request access to project (trn006) using Iris (?)
 
 To get an interactive session run
