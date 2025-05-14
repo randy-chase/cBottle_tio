@@ -39,6 +39,7 @@ V6_ICON_ZARR_PROFILE = "pbss"
 RAW_DATA_PROFILE = "pbss"
 SST_MONMEAN_DATA_PROFILE = "pbss"
 LAND_DATA_PROFILE = "pbss"
+AMIP_MID_MONTH_SST_PROFILE = "pbss"
 
 LAND_DATA_URL_10 = os.getenv(
     "LAND_DATA_URL_10", "s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_10.zarr/"
