@@ -103,3 +103,5 @@ arg_list = [
     "--plot-sample",
 ]
 inference_super_resolution(arg_list, dataset_wrapper)
+
+# plots will be stored in the working directory
