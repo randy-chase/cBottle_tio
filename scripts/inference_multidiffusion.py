@@ -56,14 +56,14 @@ def diagnostics(pred, lr, target):
         plt.savefig(f"output_{var}")
 
 
-def main():
+def inference(arg_list=None, customized_dataset=None):
     parser = argparse.ArgumentParser(description="Distributed Deep Learning Task")
     parser.add_argument("state_path", type=str, help="Path to the model state file")
     parser.add_argument("output_path", type=str, help="Path to the output directory")
     parser.add_argument(
         "--input-path", type=str, default="", help="Path to the input data"
     )
-    parser.add_argument("--plot-sample", type=bool, default=True, help="Plot samples")
+    parser.add_argument("--plot-sample", action="store_true", help="Plot samples")
     parser.add_argument(
         "--min-samples", type=int, default=1, help="Number of samples to inference"
     )
@@ -95,8 +95,7 @@ def main():
         help="Bounding box (lat_south lon_west lat_north lon_east) where super-resolution will be applied. "
         "Regions outside the box remain coarse.",
     )
-
-    args = parser.parse_args()
+    args = parser.parse_args(arg_list)
     input_path = args.input_path
     state_path = args.state_path
     output_path = args.output_path
@@ -125,8 +124,12 @@ def main():
             device = torch.device(f"cuda:{LOCAL_RANK}")
         else:
             device = torch.device("cuda")
-
-    if input_path:
+    if customized_dataset is not None:
+        test_dataset = customized_dataset(
+            split="test",
+        )
+        tasks = None
+    elif input_path:
         ds = xr.open_dataset(input_path)
         test_dataset = NetCDFWrapperV1(ds, hpx_level=hpx_level, healpixpad_order=False)
         tasks = None
@@ -186,12 +189,10 @@ def main():
         print("Performing super-resolution over the entire globe")
 
     for batch in tqdm.tqdm(loader):
-        target, inp = batch["target"], batch["condition"]
+        target = batch["target"]
         target = target[0, :, 0]
-        inp = inp[0, :, 0]
         # normalize inputs
         with torch.no_grad():
-            inp = inp.cuda(non_blocking=True)
             # coarsen the target map as condition if icon_v5 is used
             if not input_path:
                 lr = target
@@ -200,6 +201,10 @@ def main():
                     shape = lr.shape[:-1]
                     lr = lr.view(shape + (npix // 4, 4)).mean(-1)
                 inp = lr.cuda()
+            else:
+                inp = batch["condition"]
+                inp = inp[0, :, 0]
+                inp = inp.cuda(non_blocking=True)
             # get global low res
             global_lr = regrid_to_latlon(inp.double())[None,].cuda()
             lr = regrid(inp)
@@ -267,4 +272,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    inference()
