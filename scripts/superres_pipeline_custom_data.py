@@ -7,11 +7,14 @@ from types import SimpleNamespace
 from inference_multidiffusion import inference as inference_super_resolution
 from train_multidiffusion import train as train_super_resolution
 
+target_hpx_level = 6
+input_hpx_level = 3
+
 # dataset build
 variable_list_2d = ["rlut", "pr"]
 loaders = [
     zl.ZarrLoader(
-        path=f"/global/cfs/cdirs/m4581/gsharing/hackathon/scream-cess-healpix/scream2D_hrly_{var}_hp6_v7.zarr",
+        path=f"/global/cfs/cdirs/m4581/gsharing/hackathon/scream-cess-healpix/scream2D_hrly_{var}_hp{target_hpx_level}_v7.zarr",
         variables_3d=[],
         variables_2d=[var],
         levels=[],
@@ -54,7 +57,9 @@ def dataset_wrapper(*, split: str = ""):
     )
 
     # Additional metadata required for training and inference
-    dataset.grid = healpix.Grid(level=6, pixel_order=healpix.PixelOrder.NEST)
+    dataset.grid = healpix.Grid(
+        level=target_hpx_level, pixel_order=healpix.PixelOrder.NEST
+    )
     dataset.fields_out = variable_list_2d
     dataset._scale = scale
     dataset._mean = scale
@@ -73,7 +78,7 @@ train_super_resolution(
     customized_dataset=dataset_wrapper,
     num_steps=1000,
     log_freq=100,
-    lr_level=3,
+    lr_level=input_hpx_level,
     train_batch_size=50,
     test_batch_size=50,
 )
@@ -86,9 +91,9 @@ arg_list = [
     "--min-samples",
     "1",
     "--level",
-    "6",
+    f"{target_hpx_level}",
     "--level-lr",
-    "3",
+    f"{input_hpx_level}",
     "--patch-size",
     "128",
     "--overlap-size",
