@@ -101,6 +101,7 @@ def inference(arg_list=None, customized_dataset=None):
     output_path = args.output_path
     plot_sample = args.plot_sample
     hpx_level = args.level
+    hpx_lr_level = args.level_lr
     patch_size = args.patch_size
     overlap_size = args.overlap_size
     num_steps = args.num_steps
@@ -170,7 +171,7 @@ def inference(arg_list=None, customized_dataset=None):
 
     # setup grids
     high_res_grid = healpix.Grid(level=hpx_level, pixel_order=healpix.PixelOrder.NEST)
-    low_res_grid = healpix.Grid(level=6, pixel_order=healpix.PixelOrder.NEST)
+    low_res_grid = healpix.Grid(level=hpx_lr_level, pixel_order=healpix.PixelOrder.NEST)
     lat = torch.linspace(-90, 90, 128)[:, None]
     lon = torch.linspace(0, 360, 128)[None, :]
     regrid_to_latlon = low_res_grid.get_bilinear_regridder_to(lat, lon).cuda()
