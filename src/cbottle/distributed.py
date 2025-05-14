@@ -22,7 +22,9 @@ from cbottle import training_stats
 def init():
     if "MASTER_ADDR" not in os.environ:
         if "SLURM_LAUNCH_NODE_IPADDR" in os.environ:
-            os.environ["MASTER_ADDR"] = os.environ.get("SLURM_LAUNCH_NODE_IPADDR", "localhost")
+            os.environ["MASTER_ADDR"] = os.environ.get(
+                "SLURM_LAUNCH_NODE_IPADDR", "localhost"
+            )
         else:
             os.environ["MASTER_ADDR"] = "localhost"
     if "MASTER_PORT" not in os.environ:
