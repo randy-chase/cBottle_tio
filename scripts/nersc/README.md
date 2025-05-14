@@ -33,7 +33,7 @@ This will request a single 80 Gb A100 and also configure the environment to
 point to point to the datasets at NERSC. 
 
 > [!NOTE]
-> If you are interested, you can see the configured options in the `scripts/nersc/env` file. These are loaded in [this python file](../src/cbottle/config/environment.py).
+> If you are interested, you can see the configured options in the `scripts/nersc/env` file. These are loaded in [this python file](../../src/cbottle/config/environment.py).
 
 Once you have obtained the interactive session, you can run the coarse-resolution training like this
 
