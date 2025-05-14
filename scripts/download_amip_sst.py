@@ -36,7 +36,7 @@ def download_sst(output_path: str):
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
         ds.to_netcdf(output_path)  # Save to netCDF
-        print(f"Successfully downloaded SST data")
+        print("Successfully downloaded SST data")
 
     except Exception as e:
         print(f"Error downloading SST data: {e}")
