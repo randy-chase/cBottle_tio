@@ -557,7 +557,10 @@ def _get_dataset_era5(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
         loaders.append(
-            AmipSSTDataset(grid, storage_options=get_storage_options("pbss"))
+            AmipSSTDataset(
+                grid,
+                storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE),
+            )
         )
 
     metadata = DATASET_METADATA["era5"]
