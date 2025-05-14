@@ -12,4 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Load the environment variables in the nersc/env file
+set -a
+source scripts/nersc/env
+set +a
+
 srun --nodes 1 --qos interactive --time 04:00:00 -C 'gpu&hbm80g' --gpus 1 --account=trn006  --pty /bin/bash

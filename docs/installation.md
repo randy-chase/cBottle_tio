@@ -33,38 +33,37 @@ cd cBottle
 pip install -e .
 ```
 
-Then, you will need to configure NERSC paths using a .env file (you can also manually export the environment variables)
+### NERSC interactive session
+
+To get an interactive session run
+
 ```
-SUBMIT_ACCOUNT=
-SUBMIT_SCRIPT=../../ord_scripts/submit_ord.sh
-
-V6_ERA5_ZARR=/global/cfs/cdirs/trn006/data/nvidia/era5_hpx_6.zarr/
-RAW_DATA_URL_7=s3://ICON_cycle3_ngc3028/ngc3028_PT30M_7.zarr/
-RAW_DATA_URL_6=/global/cfs/cdirs/trn006/data/nvidia/ngc3028_PT30M_6.zarr/
-RAW_DATA_URL_4=s3://ICON_cycle3_ngc3028/ngc3028_PT30M_4.zarr/
-RAW_DATA_URL=/global/cfs/cdirs/trn006/data/nvidia/ngc3028_PT30M_4weeks_10.zarr/
-
-V6_ICON_ZARR=/global/cfs/cdirs/trn006/data/nvidia/ICON_v6_dataset.zarr/
-V6_ICON_ZARR_PROFILE=
-RAW_DATA_PROFILE=
-SST_MONMEAN_DATA_PROFILE=
-LAND_DATA_PROFILE=
-
-LAND_DATA_URL_10=/global/cfs/cdirs/trn006/data/nvidia/landfraction/ngc3028_P1D_10.zarr/
-LAND_DATA_URL_6=/global/cfs/cdirs/trn006/data/nvidia/landfraction/ngc3028_P1D_6.zarr/
-LAND_DATA_URL_4=s3://ICON_cycle3_ngc3028/landfraction/ngc3028_P1D_4.zarr/
-
-SST_MONMEAN_DATA_URL_6=/global/cfs/cdirs/trn006/data/nvidia/ngc3028_P1D_ts_monmean_6.zarr
-SST_MONMEAN_DATA_URL_4=
-
-ERA5_HPX64_PATH=
-ERA5_NPY_PATH_4=
-
-AMIP_MID_MONTH_SST=s3://input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc
+scripts/nersc/env/interactive.sh
 ```
 
-At this point you should be able to run the training and other inference commands.
-You will want a GPU node, this can be requested like this:
+This will request a single 80 Gb A100 and also configure the environment to
+point to point to the datasets at NERSC. 
+
+> [!NOTE]
+> If you are interested, you can see the configured options in the `scripts/nersc/env` file. These are loaded in [this python file](../src/cbottle/config/environment.py).
+
+Once you have obtained the interactive session, you can run the coarse-resolution training like this
+
 ```
-srun --nodes 1 --qos interactive --time 04:00:00 -C 'gpu&hbm80g' --gpus 1 --account=trn006  --pty /bin/bash
+# Source your venv again
+source ~/cbottle-env/bin/activate
+
+# modify these as desired
+MY_OUTPUT_PATH=path/to/the/output
+NAME=my_experiment
+
+# launch the training
+python3 scripts/train_coarse.py --loop.noise_distribution log_uniform \
+--loop.sigma_min 0.02 --loop.sigma_max 200 --loop.label_dropout 0.25 \
+--loop.batch_gpu 4 --loop.batch_size 64 --loop.dataloader_num_workers 8 \
+--loop.with_era5 --loop.use_labels  --loop.data_version 6 \
+--loop.monthly_sst_input --name v6data  --loop.dataloader_prefetch_factor 100 \
+--output_dir $MY_OUTPUT_PATH --name $NAME
 ```
+
+The outputed checkpoints will be stored at "$MY_OUTPUT_PATH/$NAME".
