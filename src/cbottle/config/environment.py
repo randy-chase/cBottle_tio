@@ -69,9 +69,9 @@ ERA5_NPY_PATH_4 = os.getenv("ERA5_NPY_PATH_4", "")
 # Data is downloaded from the https://aims2.llnl.gov/search
 AMIP_MID_MONTH_SST = os.getenv(
     "AMIP_MID_MONTH_SST",
-    "s3://input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
+    "/global/cfs/cdirs/trn006/data/nvidia/input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
 )
-AMIP_MID_MONTH_SST_PROFILE = os.getenv("AMIP_MID_MONTH_SST_PROFILE", "pbss")
+AMIP_MID_MONTH_SST_PROFILE = os.getenv("AMIP_MID_MONTH_SST_PROFILE", "")
 
 # project file
 PROJECT_ROOT = os.getenv(

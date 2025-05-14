@@ -20,8 +20,16 @@ from cbottle import training_stats
 
 
 def init():
+    if "WORLD_SIZE" not in os.environ:
+        if "SLURM_NTASKS" in os.environ:
+            os.environ["WORLD_SIZE"] = os.environ.get("SLURM_NTASKS", "1")
+        else:
+            os.environ["WORLD_SIZE"] = "1"
     if "MASTER_ADDR" not in os.environ:
-        if "SLURM_LAUNCH_NODE_IPADDR" in os.environ:
+        if (
+            int(os.environ["WORLD_SIZE"]) > 1
+            and "SLURM_LAUNCH_NODE_IPADDR" in os.environ
+        ):
             os.environ["MASTER_ADDR"] = os.environ.get(
                 "SLURM_LAUNCH_NODE_IPADDR", "localhost"
             )
@@ -39,11 +47,6 @@ def init():
             os.environ["LOCAL_RANK"] = os.environ.get("SLURM_LOCALID", "0")
         else:
             os.environ["LOCAL_RANK"] = "0"
-    if "WORLD_SIZE" not in os.environ:
-        if "SLURM_NTASKS" in os.environ:
-            os.environ["WORLD_SIZE"] = os.environ.get("SLURM_NTASKS", "1")
-        else:
-            os.environ["WORLD_SIZE"] = "1"
 
     backend = "gloo" if os.name == "nt" else "nccl"
     torch.distributed.init_process_group(backend=backend, init_method="env://")
