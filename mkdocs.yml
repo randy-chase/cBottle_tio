@@ -23,4 +23,11 @@ nav:
   - Tutorials: 
       - ICON Inference + Superresolution Training: ./tutorials.md
       - AMIP Inference: ./amip_inference.md
+theme:
+  name: material
 
+# This configuration enables admonitions, allows to make them collapsible and to nest arbitrary content inside admonitions
+markdown_extensions:
+- admonition
+- pymdownx.details
+- pymdownx.superfences
