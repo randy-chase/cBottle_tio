@@ -702,7 +702,6 @@ class SongUNet(torch.nn.Module):
         }[mixing_type]
         self.input_shape = (in_channels, time_length, domain.numel())
         self.label_dropout = label_dropout
-        self.grid = domain._grid
         emb_channels = model_channels * channel_mult_emb
         noise_channels = model_channels * channel_mult_noise
         init = dict(init_mode="xavier_uniform")
@@ -729,7 +728,7 @@ class SongUNet(torch.nn.Module):
         if calendar_embed_channels:
             # needs healpix
             self.embed_calendar = CalendarEmbedding(
-                torch.from_numpy(self.domain._grid.lon).float(), calendar_embed_channels
+                torch.from_numpy(self.grid.lon).float(), calendar_embed_channels
             )
             in_channels += self.embed_calendar.out_channels
         else:
@@ -896,6 +895,10 @@ class SongUNet(torch.nn.Module):
                 self.dec[f"{res}x{res}_aux_conv"] = factory.Conv2d(
                     in_channels=cout, out_channels=out_channels, kernel=3, **init_zero
                 )
+
+    @property
+    def grid(self):
+        return self.domain._grid
 
     def _get_arg(self, x, day_of_year, second_of_day):
         inputs = [x]
