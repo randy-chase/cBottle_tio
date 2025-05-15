@@ -604,7 +604,6 @@ def _encode_amip(
     data: dict[tuple[str, int | None], np.ndarray],
     *,
     label: int,
-    mask: np.ndarray,
 ):
     """
 
@@ -621,9 +620,6 @@ def _encode_amip(
     sst = data[("tosbcs", NO_LEVEL)]
     cond = encode_sst(sst)
 
-    if mask.dtype != np.bool_:
-        raise ValueError("mask must be a boolean array")
-
     def reorder(x):
         x = torch.as_tensor(x)
         return earth2grid.healpix.reorder(
@@ -635,7 +631,11 @@ def _encode_amip(
     second_of_day = (time - day_start) / datetime.timedelta(seconds=1)
     day_of_year = (time - year_start) / datetime.timedelta(seconds=86400)
 
-    target = np.where(mask, 0.0, np.nan)
+    nan_channels = [
+        INDEX.get_loc((channel, -1)) for channel in ["rlut", "rsut", "rsds"]
+    ]
+    target = np.zeros((INDEX.size, 1, 4**HPX_LEVEL * 12), dtype=np.float32)
+    target[nan_channels, ...] = np.nan
 
     out = {
         "target": torch.tensor(target),
@@ -668,11 +668,6 @@ def get_amip_dataset(
     if shuffle:
         raise NotImplementedError("Shuffling not implemented for AMIP dataset.")
 
-    # get mask for era5 data
-    era5_ds = _get_dataset_era5(split="test", infinite=False)
-    batch = next(iter(era5_ds))
-    mask = ~batch["target"].isnan().numpy()
-
     metadata = DATASET_METADATA["amip"]
     times = pd.date_range(metadata.start, metadata.end, freq=metadata.freq)
 
@@ -684,9 +679,7 @@ def get_amip_dataset(
             grid, storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE)
         )
     ]
-    encode_frame = functools.partial(
-        _encode_amip, label=LABELS.index("era5"), mask=mask
-    )
+    encode_frame = functools.partial(_encode_amip, label=LABELS.index("era5"))
 
     transform = functools.partial(
         _transform,
