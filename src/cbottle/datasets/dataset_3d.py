@@ -60,9 +60,9 @@ from cbottle.datasets.dataset_2d import (
     MAX_CLASSES,
     MONTHLY_SST,
     SST_LAND_FILL_VALUE,
-    AmipSSTDataset,
     encode_sst,
 )
+from cbottle.datasets.amip_sst_loader import AmipSSTLoader
 from cbottle.datasets.merged_dataset import TimeMergedDataset, TimeMergedMapStyle
 from cbottle.datasets.zarr_loader import ZarrLoader
 from cbottle.storage import get_storage_options
@@ -529,7 +529,7 @@ def _get_dataset_era5(
 ):
     target_data_loader = ZarrLoader(
         path=config.V6_ERA5_ZARR,
-        storage_options=config.V6_ERA5_ZARR_PROFILE,
+        storage_options=get_storage_options(config.V6_ERA5_ZARR_PROFILE),
         variables_3d=["u", "v", "t", "z"],
         variables_2d=[
             "sstk",
@@ -554,9 +554,8 @@ def _get_dataset_era5(
             HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
         )
         loaders.append(
-            AmipSSTDataset(
+            AmipSSTLoader(
                 grid,
-                storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE),
             )
         )
 
@@ -675,8 +674,8 @@ def get_amip_dataset(
         HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
     )
     loaders = [
-        AmipSSTDataset(
-            grid, storage_options=get_storage_options(config.AMIP_MID_MONTH_SST_PROFILE)
+        AmipSSTLoader(
+            grid,
         )
     ]
     encode_frame = functools.partial(_encode_amip, label=LABELS.index("era5"))
