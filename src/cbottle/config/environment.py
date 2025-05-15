@@ -17,6 +17,8 @@ import dotenv
 
 dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
 
+CACHE_DIR = os.path.expanduser("~/.cache/cbottle")
+
 # slurm submission info
 SUBMIT_ACCOUNT = os.getenv("SUBMIT_ACCOUNT")
 SUBMIT_SCRIPT = os.getenv("SUBMIT_SCRIPT", "../../ord_scripts/submit_ord.sh")
@@ -71,7 +73,10 @@ ERA5_NPY_PATH_4 = os.getenv("ERA5_NPY_PATH_4", "")
 # Data is downloaded from the https://aims2.llnl.gov/search
 AMIP_MID_MONTH_SST = os.getenv(
     "AMIP_MID_MONTH_SST",
-    "/global/cfs/cdirs/trn006/data/nvidia/input4MIPs/tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
+    os.path.join(
+        CACHE_DIR,
+        "tosbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-9_gn_187001-202212.nc",
+    ),
 )
 AMIP_MID_MONTH_SST_PROFILE = os.getenv("AMIP_MID_MONTH_SST_PROFILE", "")
 
