@@ -21,7 +21,20 @@ python3 scripts/train_coarse.py --loop.noise_distribution log_uniform --loop.sig
 
 ### Inference
 
-See `scripts/inference_coarse.py`.
+AMIP monthly mean SST data is required as a conditioning input to inference the coarse models. Follow these steps:
+
+1. Download the data:
+   ```bash
+   python3 scripts/download_amip_sst.py
+   ```
+
+2. Configure the environment variables to point to the downloaded data:
+   ```bash
+   export AMIP_MID_MONTH_SST="/path/to/data"
+   export AMIP_MID_MONTH_SST_PROFILE=""
+   ```
+
+Once the AMIP SST data is configured, see `scripts/inference_coarse.py`.
 
 ## Coarse Video Model (cBottle-video)
 
