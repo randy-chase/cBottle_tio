@@ -14,7 +14,7 @@
 # limitations under the License.
 import pytest
 import os
-import train_multidiffusion
+from cbottle.training import super_resolution
 
 
 def test_train(tmp_path):
@@ -29,10 +29,6 @@ def test_train(tmp_path):
             "Try running pytest with `torchrun ... -m pytest` or mpirun."
         )
 
-    train_multidiffusion.train(
-        tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True
-    )
+    super_resolution.train(tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True)
     # this should load the checkpoint
-    train_multidiffusion.train(
-        tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True
-    )
+    super_resolution.train(tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True)

@@ -18,8 +18,11 @@ from earth2grid import healpix
 import numpy as np
 from functools import partial
 from types import SimpleNamespace
+import sys
+from cbottle.training import super_resolution
+
+sys.path.append("scripts")
 from inference_multidiffusion import inference as inference_super_resolution
-from train_multidiffusion import train as train_super_resolution
 
 target_hpx_level = 6
 input_hpx_level = 3
@@ -87,7 +90,7 @@ def dataset_wrapper(*, split: str = ""):
 # super-res model training
 
 
-train_super_resolution(
+super_resolution.train(
     output_path="training_output",
     customized_dataset=dataset_wrapper,
     num_steps=1000,
