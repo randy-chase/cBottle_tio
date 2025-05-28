@@ -40,7 +40,7 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
             )
 
     elif config.architecture == "unet_hpx1024_patch":
-        architecture = networks.SongUNetHPX1024(
+        architecture = networks.SongUnetHPXPatch(
             in_channels=config.condition_channels
             + config.out_channels
             + config.position_embed_channels,

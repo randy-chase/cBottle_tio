@@ -1235,7 +1235,7 @@ def SongUNetHPX256(in_channels: int, out_channels: int, **kwargs) -> SongUNet:
     )
 
 
-def SongUNetHPX1024(
+def SongUnetHPXPatch(
     in_channels: int, out_channels: int, img_resolution: int, level: int, **kwargs
 ) -> SongUNet:
     """Unet for patched HPX1024 resolution"""
