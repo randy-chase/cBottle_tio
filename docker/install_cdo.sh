@@ -12,23 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pytest
-import os
-from cbottle.training import super_resolution
+set -e
+apt-get install -y libnetcdf-dev libeccodes-dev
 
+cd /tmp
 
-def test_train(tmp_path):
-    """Run like this
+[[ -d cdo-2.4.4 ]] || curl -L https://code.mpimet.mpg.de/attachments/download/29649/cdo-2.4.4.tar.gz | tar xz
+cd cdo-2.4.4
+./configure --prefix /usr/local --with-netcdf=yes --with-eccodes=yes
+make clean
+make -j 8 
+make install
 
-    torchrun --nproc_per_node 1 -m pytest -vv -rs tests/integration/test_train_multidiffusion.py -s
-
-    """
-    if "WORLD_SIZE" not in os.environ:
-        pytest.skip(
-            "This test must be run in a parallel context. "
-            "Try running pytest with `torchrun ... -m pytest` or mpirun."
-        )
-
-    super_resolution.train(tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True)
-    # this should load the checkpoint
-    super_resolution.train(tmp_path.as_posix(), num_steps=1, log_freq=1, test_fast=True)
+# clean up
+cd /tmp
+rm -r cdo-2.4.4
