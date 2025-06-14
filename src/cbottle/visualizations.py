@@ -137,7 +137,7 @@ def visualize(
 
     if nest:
         pixel_order = healpix.PixelOrder.NEST
-    if hpxpad:
+    elif hpxpad:
         pixel_order = healpix.HEALPIX_PAD_XY
     else:
         pixel_order = healpix.PixelOrder.RING
