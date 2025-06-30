@@ -11,6 +11,25 @@ This model is for research and development only.
 
 See [installation](docs/installation.md) instructions.
 
+
+## Inference APIs
+
+Inference APIs for the published checkpoints are provided in [Earth2Studio](https://github.com/NVIDIA/earth2studio).
+For example, to start inferencing data from the coarse model (cBottle-3d):
+
+```python
+from earth2studio.data import CBottle3D
+package = CBottle3D.load_default_package()
+cbottle_ds = CBottle3D.load_model(package)
+ds = cbottle_ds.to("cuda")
+cbottle_da = ds([datetime(2022, 9, 5)], ["msl", "tcwv"])
+```
+
+See the Earth2Studio [install instructions](https://nvidia.github.io/earth2studio/userguide/about/install.html#diagnostics) and dedicated notebooks for more information:
+
+- [CBottle Data Generation and Infilling](https://nvidia.github.io/earth2studio/examples/15_cbottle_generation.html)
+- [CBottle Super Resolution](https://nvidia.github.io/earth2studio/examples/16_cbottle_super_resolution.html)
+
 ## Coarse Model (cBottle-3d)
 
 ### Training
@@ -18,6 +37,7 @@ See [installation](docs/installation.md) instructions.
 ```
 python3 scripts/train_coarse.py --loop.noise_distribution log_uniform --loop.sigma_min 0.02 --loop.sigma_max 200 --loop.label_dropout 0.25 --loop.batch_gpu 4 --loop.batch_size 64 --loop.dataloader_num_workers 8 --loop.with_era5 --loop.use_labels  --loop.data_version 6 --loop.monthly_sst_input --name v6data  --loop.dataloader_prefetch_factor 100
 ```
+
 
 ## Coarse Video Model (cBottle-video)
 
@@ -50,6 +70,7 @@ python3 scripts/train_coarse.py
 ```
 
 ### Inference
+
 To create netcdf files of the generations (and optionally the corresponding ground truth), run the following:
 ```
 torchrun --nproc-per-node 8 scripts/inference_coarse_video.py \
