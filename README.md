@@ -20,8 +20,7 @@ For example, to start inferencing data from the coarse model (cBottle-3d):
 ```python
 from earth2studio.data import CBottle3D
 package = CBottle3D.load_default_package()
-cbottle_ds = CBottle3D.load_model(package)
-ds = cbottle_ds.to("cuda")
+ds = CBottle3D.load_model(package).to("cuda")
 cbottle_da = ds([datetime(2022, 9, 5)], ["msl", "tcwv"])
 ```
 
