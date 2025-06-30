@@ -18,6 +18,7 @@ Inference APIs for the published checkpoints are provided in [Earth2Studio](http
 For example, to start inferencing data from the coarse model (cBottle-3d):
 
 ```python
+from datetime import datetime
 from earth2studio.data import CBottle3D
 package = CBottle3D.load_default_package()
 ds = CBottle3D.load_model(package).to("cuda")
