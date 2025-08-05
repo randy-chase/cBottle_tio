@@ -20,6 +20,7 @@ from cbottle.config.models import ModelConfigV1
 
 def get_model(config: ModelConfigV1) -> torch.nn.Module:
     if config.architecture == "unet_hpx64":
+        precond_cls = networks.EDMPrecond
         if config.time_length > 1:
             architecture = networks.SongUNetHPX64Video(
                 config.out_channels + config.condition_channels,
@@ -29,6 +30,7 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
                 model_channels=config.model_channels,
                 time_length=config.time_length,
                 label_dropout=config.label_dropout,
+                calendar_include_legacy_bug=config.calendar_include_legacy_bug,
             )
         else:
             architecture = networks.SongUNetHPX64(
@@ -37,9 +39,12 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
                 label_dim=config.label_dim,
                 calendar_embed_channels=8,
                 model_channels=config.model_channels,
+                calendar_include_legacy_bug=config.calendar_include_legacy_bug,
+                enable_classifier=config.enable_classifier,
             )
 
     elif config.architecture == "unet_hpx1024_patch":
+        precond_cls = networks.EDMPrecondLegacy
         architecture = networks.SongUnetHPXPatch(
             in_channels=config.condition_channels
             + config.out_channels
@@ -54,7 +59,7 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
     else:
         raise NotImplementedError(config.architecture)
 
-    return networks.EDMPrecond(
+    return precond_cls(
         model=architecture,
         domain=architecture.domain,
         img_channels=config.out_channels,

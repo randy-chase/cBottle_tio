@@ -26,7 +26,13 @@ class ModelConfigV1:
     time_length: int = 1
     label_dropout: float = 0.0
     level: int = 10
-
+    # by default use the buggy implementation of the calendar embedding, since
+    # this is needed for backwards compatibility w/ existing checkpoints
+    calendar_include_legacy_bug: bool = True
+    # for backwards compatibility with old checkpoints
+    noise_dependent_dropout_config: dict | None = None
+    # if true enable the HPX16 classifier -- used for hurricane guidance
+    enable_classifier: bool = False
     # arguments for SongUnetHPX1024
     position_embed_channels: int = 20
     img_resolution: int = 128
@@ -36,4 +42,5 @@ class ModelConfigV1:
 
     @classmethod
     def loads(cls, s):
-        return cls(**json.loads(s))
+        d = json.loads(s)
+        return cls(**d)

@@ -12,6 +12,7 @@
 You can run an SST-conditioned (AMIP) inference like this
 
     python scripts/inference_coarse.py \
+        --sample.mode sample \
         --sample.min_samples 1 \
         --dataset amip \
         cBottle-3d.zip \

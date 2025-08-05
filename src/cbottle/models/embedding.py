@@ -88,19 +88,30 @@ class CalendarEmbedding(torch.nn.Module):
 
     """
 
-    def __init__(self, lon, embed_channels: int):
+    def __init__(self, lon, embed_channels: int, include_legacy_bug: bool = False):
+        """
+        Args:
+            include_legacy_bug: Provided for backwards compatibility
+                with existing checkpoints. If True, use the incorrect formula
+                for local_time (hour - lon) instead of the correct formula (hour + lon)
+        """
         super().__init__()
         self.register_buffer("lon", lon, persistent=False)
         self.embed_channels = embed_channels
         self.embed_second = FrequencyEmbedding(embed_channels)
         self.embed_day = FrequencyEmbedding(embed_channels)
         self.out_channels = embed_channels * 4
+        self.include_legacy_bug = include_legacy_bug
 
     def forward(self, day_of_year, second_of_day):
         if second_of_day.shape != day_of_year.shape:
             raise ValueError()
 
-        local_time = (second_of_day.unsqueeze(2) - self.lon * 86400 // 360) % 86400
+        if self.include_legacy_bug:
+            local_time = (second_of_day.unsqueeze(2) - self.lon * 86400 // 360) % 86400
+        else:
+            local_time = (second_of_day.unsqueeze(2) + self.lon * 86400 // 360) % 86400
+
         a = self.embed_second(local_time / 86400)
         doy = day_of_year.unsqueeze(2)
         b = self.embed_day((doy / 365.25) % 1)

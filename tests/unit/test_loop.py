@@ -14,11 +14,23 @@
 # limitations under the License.
 from cbottle.training import loop
 import torch
+from cbottle.datasets.base import BatchInfo, TimeUnit
 
 
 class MockLoop(loop.TrainingLoopBase):
     def get_data_loaders(self, batch_gpu: int):
-        return None, None, None
+        class MockDataset:
+            def __init__(self):
+                self.batch_info = BatchInfo(
+                    channels=["channel_0", "channel_1"],
+                    time_step=1,
+                    time_unit=TimeUnit.HOUR,
+                    scales=[1.0, 1.0],
+                    center=[0.0, 0.0],
+                )
+
+        dataset = MockDataset()
+        return dataset, None, None
 
     def get_network(self) -> torch.nn.Module:
         return torch.nn.Linear(10, 10)

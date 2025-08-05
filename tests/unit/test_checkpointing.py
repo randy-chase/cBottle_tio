@@ -24,7 +24,7 @@ def _assert_state_dict_equal(d1, d2):
 
 
 def test_checkpointing(tmp_path):
-    config = ModelConfigV1(model_channels=2)
+    config = ModelConfigV1(model_channels=8)
     model = models.get_model(config)
 
     state_dict = model.state_dict()

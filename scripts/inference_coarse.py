@@ -16,18 +16,19 @@ import logging
 import os
 from dataclasses import dataclass
 from enum import Enum, auto
-
+from typing import Optional
 import cbottle.distributed as dist
-import earth2grid
 import torch
 import torch.distributed
 import tqdm
 from cbottle.dataclass_parser import Help, a, parse_args
 from cbottle.datasets import dataset_3d, samplers
-from cbottle.datasets.dataset_2d import HealpixDatasetV5
+from cbottle.datasets.dataset_3d import VARIABLE_CONFIGS
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
-from cbottle.denoiser_factories import get_denoiser, DenoiserType
-from cbottle.datasets.base import BatchInfo
+import cbottle.inference
+import numpy as np
+import warnings
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -53,55 +54,64 @@ class SamplerArgs:
     start_from_noisy_image: a[bool, Help("Start from a noisy image")] = False
     sigma_max: a[float, Help("Maximum sigma value")] = 80.0
     sampler: Sampler = Sampler.all
-
-    denoiser_when_nan: a[str, Help("Choices: ['', 'icon']")] = ""
-    denoiser_type: a[
-        DenoiserType, Help("Choices: ['mask_filling', 'infill', 'standard']")
-    ] = DenoiserType.standard
-    save_data: bool = False
-    bias_correct: bool = False
-    """If True, then bias correct the input data to look like ERA5
-    """
+    mode: a[str, Help("options: infill, translate, sample, save_data")] = "sample"
+    translate_dataset: a[
+        str,
+        Help(
+            'Dataset to translate input to when using mode == "translate". era5 or icon.'
+        ),
+    ] = "icon"
     bf16: a[bool, Help("Use bf16")] = False
     batch_gpu: a[int, Help("Batch size per GPU")] = 4
     seed: int | None = None
+    tc_location: a[
+        str, Help("TC location(s) as 'lat,lon' or 'lat1,lon1;lat2,lon2;...'")
+    ] = ""
+    guidance_scale: a[float, Help("Guidance scale")] = 0.03
 
 
 @dataclass
 class CLI:
-    state_path: a[str, Help("Path to the model state file")]
+    state_path: a[
+        str,
+        Help(
+            "Paths to the model state file (accept comma-separated paths for sigma-dependent MoE with descending order)"
+        ),
+    ]
     output_path: a[str, Help("Path to the output directory")]
+    sigma_thresholds: a[str, Help("Comma-separated thresholds")] = "100.0,10.0"
     dataset: Dataset = Dataset.icon
     data_split: str = ""
     sst_offset: float = 0.0
     sample: SamplerArgs = SamplerArgs()
     hpx_level: int = 6
+    start_time: a[str, Help("Start time")] = ""
+    end_time: a[str, Help("End time")] = "2018-12-31"
+    timestamp_frequency: a[str, Help("Timestamp frequency, out of h, D, M, Y")] = "h"
 
 
 units = "seconds since 1900-1-1 0:0:0"
 calendar = "proleptic_gregorian"
 
 
-def build_labels(labels, denoiser_when_nan: str):
-    out_labels = torch.zeros_like(labels)
-    if denoiser_when_nan == "icon":
-        out_labels[:, HealpixDatasetV5.LABEL] = 1
-    return out_labels
+def parse_tc_location(tc_location: str):
+    pairs = [p.strip() for p in tc_location.split(";") if p.strip()]
+    if pairs:
+        coords = [tuple(map(float, pair.split(","))) for pair in pairs]
+        lats, lons = zip(*coords)
+        return lats, lons
+    return None, None
 
 
-def prepare_for_saving(
-    x: torch.Tensor, hpx: earth2grid.healpix.Grid, batch_info: BatchInfo
-):
-    """
-    Denormalizes and reorders data to RING order
-    """
-    x = batch_info.denormalize(x)
-    ring_order = hpx.reorder(earth2grid.healpix.PixelOrder.RING, x)
-    return {batch_info.channels[c]: ring_order[:, c] for c in range(x.shape[1])}
+def get_requested_times(args):
+    if args.start_time:
+        return pd.date_range(
+            start=args.start_time, end=args.end_time, freq=args.timestamp_frequency
+        )
 
 
 def save_inferences(
-    net,
+    model: cbottle.inference.CBottle3d,
     dataset,
     output_path,
     *,
@@ -110,9 +120,14 @@ def save_inferences(
     config: SamplerArgs,
     rank: int,
     world_size: int,
+    moe_nets: Optional[list[torch.nn.Module]] = None,
+    tc_lats: list[float] | None = None,
+    tc_lons: list[float] | None = None,
 ):
     attrs = attrs or {}
     tasks = None
+    if moe_nets and len(moe_nets) == 1:
+        moe_nets = None
 
     # Initialize netCDF writer
     nc_config = NetCDFConfig(
@@ -155,148 +170,64 @@ def save_inferences(
             writer.time_index * world_size > config.min_samples
         ):
             break
-        images, labels, condition = batch["target"], batch["labels"], batch["condition"]
-        second_of_day = batch["second_of_day"].cuda().float()
-        day_of_year = batch["day_of_year"].cuda().float()
-        # TODO parameterize
-        with torch.no_grad():
-            condition = condition.cuda()
-            labels = labels.cuda()
-            images = images.cuda()
+        images = batch["target"]
 
-            from cbottle.diffusion_samplers import (
-                StackedRandomGenerator,
-                edm_sampler_from_sigma,
+        indices_where_tc = None
+        if tc_lons is not None:
+            indices_where_tc = model.get_guidance_pixels(tc_lons, tc_lats)
+            np.save(
+                os.path.join(output_path, "indices_where_tc.npy"),
+                indices_where_tc.numpy(),
             )
 
-            device = condition.device
-
-            if config.seed is None:
-                rnd = torch
-            else:
-                rnd = StackedRandomGenerator(
-                    device, seeds=[config.seed] * images.shape[0]
+        match config.mode:
+            case "save_data":
+                out, coords = model.denormalize(images)
+            case "translate":
+                out, coords = model.translate(batch, dataset=config.translate_dataset)
+            case "infill":
+                out, coords = model.infill(batch)
+            case "sample":
+                out, coords = model.sample(
+                    batch,
+                    start_from_noisy_image=config.start_from_noisy_image,
+                    guidance_pixels=indices_where_tc,
+                    guidance_scale=config.guidance_scale,
+                    bf16=config.bf16,
                 )
+            case _:
+                raise NotImplementedError(config.mode)
 
-            latents = rnd.randn(
-                (
-                    images.shape[0],
-                    net.img_channels,
-                    net.time_length,
-                    net.domain.numel(),
-                ),
-                device=device,
-            )
-
-            if config.start_from_noisy_image:
-                xT = latents * config.sigma_max + images
-            else:
-                xT = latents * config.sigma_max
-
-            labels_when_nan = None
-            if config.denoiser_type == DenoiserType.mask_filling:
-                labels_when_nan = build_labels(labels, config.denoiser_when_nan)
-            elif config.denoiser_type == DenoiserType.infill:
-                labels = build_labels(labels, config.denoiser_when_nan)
-
-            # Gets appropriate denoiser based on config
-            D = get_denoiser(
-                net=net,
-                images=images,
-                labels=labels,
-                condition=condition,
-                second_of_day=second_of_day,
-                day_of_year=day_of_year,
-                denoiser_type=config.denoiser_type,
-                sigma_max=config.sigma_max,
-                labels_when_nan=labels_when_nan,
-            )
-
-            if config.save_data:
-                out = images
-            elif config.bias_correct:
-                # First encode with noise
-                tmin = 0.02
-                tmax = int(config.sigma_max)  # Convert to int for type compatibility
-                y0 = images + torch.randn_like(images) * tmin
-
-                encoded = edm_sampler_from_sigma(
-                    D,
-                    y0,
-                    sigma_max=tmax,
-                    sigma_min=tmin,
-                    num_steps=24,
-                    randn_like=torch.randn_like,
-                    reverse=True,
-                    S_noise=0,
-                )
-
-                labels_when_nan = torch.zeros_like(batch["labels"].cuda())
-                labels_when_nan[:, 0] = 1.0
-                era5labels = torch.nn.functional.one_hot(
-                    torch.tensor([1], device=condition.device), 1024
-                )
-
-                denoiser_era5 = get_denoiser(
-                    net=net,
-                    images=images,
-                    labels=era5labels,
-                    condition=condition,
-                    second_of_day=second_of_day,
-                    day_of_year=day_of_year,
-                    denoiser_type=DenoiserType.mask_filling,
-                    labels_when_nan=labels_when_nan,
-                )
-
-                # Then decode with ERA5 labels
-                out = edm_sampler_from_sigma(
-                    denoiser_era5,
-                    encoded,
-                    sigma_max=tmax,
-                    sigma_min=tmin,
-                    randn_like=torch.randn_like,
-                    num_steps=24,
-                    S_noise=0,
-                )
-            else:
-                with torch.autocast("cuda", enabled=config.bf16, dtype=torch.bfloat16):
-                    out = edm_sampler_from_sigma(
-                        D,
-                        xT,
-                        randn_like=torch.randn_like,
-                        sigma_max=int(
-                            config.sigma_max
-                        ),  # Convert to int for type compatibility
-                    )
-
-            ring_denormalized_data = prepare_for_saving(
-                out, net.domain._grid, dataset.batch_info
-            )
-
-            # Convert time data to timestamps
-            timestamps = batch["timestamp"]
-
-            writer.write_batch(ring_denormalized_data, timestamps)
+        writer.write_target(out, coords, batch["timestamp"])
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    warnings.filterwarnings("ignore", "Cannot do a zero-copy NCHW to NHWC")
     args = parse_args(CLI, convert_underscore_to_hyphen=False)
-    state_path = args.state_path
+
+    state_paths = [s.strip() for s in args.state_path.split(",")]
+    sigma_thresholds = [float(tok) for tok in args.sigma_thresholds.split(",")]
+    sigma_thresholds = sigma_thresholds[: len(state_paths) - 1]
+
+    if args.sample.tc_location:
+        tc_lats, tc_lons = parse_tc_location(args.sample.tc_location)
+        if tc_lats is None or tc_lons is None:
+            raise ValueError("Invalid TC location format")
+    else:
+        tc_lats = tc_lons = None
+
+    logging.info(f"Using {len(state_paths)} model state path(s)")
+    for path in state_paths:
+        logging.info(f" - {path}")
 
     dist.init()
 
-    # get dataset options from loop
-    from cbottle.checkpointing import Checkpoint
-
-    with Checkpoint(state_path) as checkpoint:
-        net = checkpoint.read_model()
-
-    net.eval()
-    net.requires_grad_(False)
-    net.float()
-    net.cuda()
-
+    model = cbottle.inference.CBottle3d.from_pretrained(
+        state_paths,
+        sigma_thresholds=sigma_thresholds,
+        sigma_max=args.sample.sigma_max,
+    )
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -309,6 +240,9 @@ def main():
 
     # only one time step in this:
     # dataset = Era5Dataset(args.hpx_level, train=False)
+    batch_info = model.coords.batch_info
+    variables = dataset_3d.guess_variable_config(batch_info.channels)
+
     dataset = dataset_3d.get_dataset(
         rank=rank,
         world_size=world_size,
@@ -317,18 +251,26 @@ def main():
         sst_input=True,
         infinite=False,
         shuffle=False,
+        variable_config=VARIABLE_CONFIGS[variables],
     )
 
+    requested_times = get_requested_times(args)
+    if requested_times is not None:
+        dataset.set_times(requested_times)
+
     dataset.infinite = False
+    dataset.batch_info = batch_info
 
     save_inferences(
-        net,
+        model,
         dataset,
         args.output_path,
         hpx_level=args.hpx_level,
         config=args.sample,
         rank=rank,
         world_size=world_size,
+        tc_lats=tc_lats,
+        tc_lons=tc_lons,
     )
 
 

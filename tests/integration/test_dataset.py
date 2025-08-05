@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from cbottle.datasets.amip_sst_loader import AmipSSTLoader
+from cbottle.datasets import ibtracs
 from cbottle.datasets import dataset_3d
-from cbottle.datasets.dataset_3d import INDEX
 from cbottle.storage import StorageConfigError
 from cbottle.training.video.frame_masker import FrameMasker
+import numpy as np
+import asyncio
 
 import datetime
 import pytest
-
-nchannel = len(INDEX)
 
 
 def test_AmipSSTDataset():
@@ -42,23 +42,34 @@ def test_dataset_v6():
 
     data = next(iter(ds))
     npix = 12 * 64**2
+    index = dataset_3d._get_index()
+    nchannel = len(index)
     assert data["target"].shape == (nchannel, 1, npix)
     assert data["condition"].shape[-1] == npix
 
     # rsut, rlut, rsds are the only missing channels for era5
     y = data["target"]
     missing = y.isnan().any(dim=(1, 2))
-    missing_vars = INDEX[missing.numpy()].get_level_values("variable")
+    missing_vars = index[missing.numpy()].get_level_values("variable")
     assert set(missing_vars) == {"rlut", "rsut", "rsds"}
 
 
-def test_dataset_v6_icon():
+@pytest.mark.parametrize("name", list(dataset_3d.VARIABLE_CONFIGS))
+def test_dataset_v6_icon(name: str):
+    variable_config = dataset_3d.VARIABLE_CONFIGS[name]
     try:
-        ds = dataset_3d.get_dataset(split="train", dataset="icon", sst_input=False)
+        ds = dataset_3d.get_dataset(
+            split="train",
+            dataset="icon",
+            sst_input=False,
+            variable_config=variable_config,
+        )
     except StorageConfigError:
         pytest.skip()
 
-    next(iter(ds))
+    sample = next(iter(ds))
+    nchannel = len(dataset_3d.get_batch_info(variable_config).channels)
+    assert sample["target"].shape[0] == nchannel
 
 
 @pytest.mark.parametrize("dataset_name", ["era5", "icon"])
@@ -84,6 +95,8 @@ def test_dataset_v6_video(dataset_name):
 
     data = next(iter(ds))
     npix = 12 * 64**2
+    index = dataset_3d._get_index()
+    nchannel = len(index)
     assert data["target"].shape == (nchannel, time_length, npix)
     assert data["condition"].shape[-1] == npix
 
@@ -95,3 +108,12 @@ def test_dataset_v6_video(dataset_name):
         diff = (t2 - t1) % seconds_per_day
 
         assert diff == time_step * 3600
+
+
+def test_ibtracs():
+    loader = ibtracs.IBTracs()
+    times = np.array([np.datetime64("2000-08-01T00:00:00")])
+    output = asyncio.run(loader.sel_time(times))
+    value = output.pop(("ibtracs_labels", -1))
+    assert value.shape == (1, 1, 1, 768)
+    assert not output

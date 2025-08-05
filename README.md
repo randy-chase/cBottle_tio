@@ -45,7 +45,7 @@ python3 scripts/train_coarse.py --loop.noise_distribution log_uniform --loop.sig
 Video training requires larger chunk sizes than image training.
 
 ```
-python3 scripts/train_coarse.py
+python3 scripts/train_coarse.py \
     --name v6-video \
     --loop.time_length 12 \
     --loop.time_step 6 \
