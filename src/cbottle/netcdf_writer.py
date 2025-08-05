@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional
 
 import cftime
+from cbottle.inference import Coords
 import netCDF4 as nc
+import earth2grid
 import numpy as np
 import torch
 
@@ -48,6 +50,8 @@ class NetCDFConfig:
 
 class NetCDFWriter:
     """Helper class for writing data to netCDF files in the standard format"""
+
+    pixel_order = earth2grid.healpix.PixelOrder.RING
 
     def __init__(
         self,
@@ -138,6 +142,16 @@ class NetCDFWriter:
             )
             v.description = "Lead time in hours"
             v.time_units = "hours"
+
+    def write_target(
+        self,
+        target: torch.Tensor,
+        coords: Coords,
+        timestamps: torch.Tensor,
+    ):
+        out = coords.grid.reorder(self.pixel_order, target)
+        output = {c: out[:, k] for k, c in enumerate(coords.batch_info.channels)}
+        self.write_batch(output, timestamps)
 
     def write_batch(
         self,

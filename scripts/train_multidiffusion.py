@@ -33,6 +33,15 @@ def parse_args():
     parser.add_argument(
         "--test-batch-size", type=int, default=30, help="validation batch size per GPU"
     )
+    parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        default=3,
+        help="number of workers for training dataloader",
+    )
+    parser.add_argument(
+        "--bf16", action="store_true", help="use bfloat16 precision for training"
+    )
     return parser.parse_args()
 
 
@@ -45,4 +54,6 @@ if __name__ == "__main__":
         lr_level=args.lr_level,
         train_batch_size=args.train_batch_size,
         test_batch_size=args.test_batch_size,
+        dataloader_num_workers=args.dataloader_num_workers,
+        bf16=args.bf16,
     )

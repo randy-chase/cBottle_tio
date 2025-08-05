@@ -45,15 +45,14 @@ Mermaid chart of the use of MergedTimeDataset in this module::
 import datetime
 import functools
 import pathlib
-from typing import Optional, Callable
+from typing import Optional
 import dataclasses
-import cbottle.config.environment as config
 import cftime
 import earth2grid
 import numpy as np
 import pandas as pd
 import torch
-import zarr
+from cbottle.datasets import catalog
 from cbottle.datasets.base import BatchInfo, TimeUnit
 from cbottle.datasets.dataset_2d import (
     LABELS,
@@ -62,34 +61,65 @@ from cbottle.datasets.dataset_2d import (
     SST_LAND_FILL_VALUE,
     encode_sst,
 )
+from cbottle.datasets.ibtracs import IBTracs
 from cbottle.datasets.amip_sst_loader import AmipSSTLoader
 from cbottle.datasets.merged_dataset import TimeMergedDataset, TimeMergedMapStyle
 from cbottle.datasets.zarr_loader import ZarrLoader
-from cbottle.storage import get_storage_options
-
 from cbottle.training.video.frame_masker import FrameMasker
 
 NO_LEVEL = -1
 
 HPX_LEVEL = 6
 # in hpa
-LEVELS = [1000, 850, 700, 500, 300, 200, 50, 10]
-VARIABLES_3D = ["U", "V", "T", "Z"]
-VARIABLES_2d = [
-    "tcwv",
-    "cllvi",
-    "clivi",
-    "tas",
-    "uas",
-    "vas",
-    "rlut",
-    "rsut",
-    "pres_msl",
-    "pr",
-    "rsds",
-    "sst",
-    "sic",
-]
+
+
+@dataclasses.dataclass(frozen=True)
+class VariableConfig:
+    variables_2d: list[str]
+    variables_3d: list[str]
+    levels: list[int]
+
+
+VARIABLE_CONFIGS = {}
+VARIABLE_CONFIGS["default"] = VariableConfig(
+    levels=[1000, 850, 700, 500, 300, 200, 50, 10],
+    variables_3d=["U", "V", "T", "Z"],
+    variables_2d=[
+        "tcwv",
+        "cllvi",
+        "clivi",
+        "tas",
+        "uas",
+        "vas",
+        "rlut",
+        "rsut",
+        "pres_msl",
+        "pr",
+        "rsds",
+        "sst",
+        "sic",
+    ],
+)
+VARIABLE_CONFIGS["q"] = VariableConfig(
+    levels=[1000, 850, 700, 500, 300, 200, 50, 10],
+    variables_3d=["U", "V", "T", "Z", "Q"],
+    variables_2d=[
+        "tcwv",
+        "cllvi",
+        "clivi",
+        "tas",
+        "uas",
+        "vas",
+        "rlut",
+        "rsut",
+        "pres_msl",
+        "pr",
+        "rsds",
+        "sst",
+        "sic",
+    ],
+)
+_default_config = VARIABLE_CONFIGS["default"]
 
 
 @dataclasses.dataclass
@@ -109,7 +139,7 @@ DATASET_METADATA: dict[str, DatasetMetadata] = {
     "era5": DatasetMetadata(
         name="era5",
         start="1980",
-        end="2019",
+        end="2022",
         time_step=1,
         time_unit=TimeUnit.HOUR,
     ),
@@ -129,14 +159,16 @@ DATASET_METADATA: dict[str, DatasetMetadata] = {
     ),
 }
 
-INDEX = pd.MultiIndex.from_tuples(
-    [(v, level) for v in VARIABLES_3D for level in LEVELS]
-    + [(v, NO_LEVEL) for v in VARIABLES_2d],
-    names=["variable", "level"],
-)
+
+def _get_index(config: VariableConfig = _default_config):
+    return pd.MultiIndex.from_tuples(
+        [(v, level) for v in config.variables_3d for level in config.levels]
+        + [(v, NO_LEVEL) for v in config.variables_2d],
+        names=["variable", "level"],
+    )
 
 
-def encode_channel(channel) -> str:
+def _encode_channel(channel) -> str:
     name, level = channel
     if level != NO_LEVEL:
         return f"{name}{level}"
@@ -144,28 +176,30 @@ def encode_channel(channel) -> str:
         return name
 
 
-def get_stats():
+def _get_stats():
     path = pathlib.Path(__file__).parent / "dataset_v6_stats.csv"
     return pd.read_csv(path).set_index(["variable", "level"])
 
 
-def get_std():
-    stats = get_stats()
-    return stats.loc[INDEX]["std"].values
+def get_std(config: VariableConfig = _default_config):
+    stats = _get_stats()
+    return stats.loc[_get_index(config)]["std"].values
 
 
-def get_mean():
-    stats = get_stats()
-    return stats.loc[INDEX]["mean"].values
+def get_mean(config: VariableConfig = _default_config):
+    stats = _get_stats()
+    return stats.loc[_get_index(config)]["mean"].values
 
 
 def get_batch_info(
-    time_step: int = 1, time_unit: TimeUnit = TimeUnit.HOUR
+    config: VariableConfig = _default_config,
+    time_step: int = 1,
+    time_unit: TimeUnit = TimeUnit.HOUR,
 ) -> BatchInfo:
     return BatchInfo(
-        channels=[encode_channel(tup) for tup in INDEX.tolist()],
-        scales=get_std(),
-        center=get_mean(),
+        channels=[_encode_channel(tup) for tup in _get_index(config).tolist()],
+        scales=get_std(config),
+        center=get_mean(config),
         time_step=time_step,
         time_unit=time_unit,
     )
@@ -182,48 +216,22 @@ def _compute_frame_step(
     return model_resolution_timedelta // dataset_spacing
 
 
-def cftime_to_timestamp(time: cftime.DatetimeGregorian) -> float:
+def _cftime_to_timestamp(time: cftime.DatetimeGregorian) -> float:
     return datetime.datetime(
         *cftime.to_tuple(time), tzinfo=datetime.timezone.utc
     ).timestamp()
 
 
-def collect_fields(data: dict[tuple[str, int | None], np.ndarray]) -> np.ndarray:
+def _collect_fields(
+    index, data: dict[tuple[str, int | None], np.ndarray]
+) -> np.ndarray:
     out = np.full(
-        shape=[INDEX.size, 1, 4**HPX_LEVEL * 12], dtype=np.float32, fill_value=np.nan
+        shape=[index.size, 1, 4**HPX_LEVEL * 12], dtype=np.float32, fill_value=np.nan
     )
-    for i, key in enumerate(INDEX):
+    for i, key in enumerate(index):
         if key in data:
             out[i, 0] = data[key]
     return out
-
-
-def combine_and_mask_frames(
-    frames: list[dict], frame_masker: FrameMasker
-) -> dict[str, torch.Tensor | float]:
-    """
-    For video usage, combines a list of unbatched frame dictionaries into a single dictionary
-    by concatenating tensors along the time dimension. Then applies masking to the combined frames.
-
-    Input shapes:
-    - Field tensors (target, condition): (C, 1, X) -> (C, T, X)
-    - Scalar values (second_of_day, day_of_year): [1] -> [T]
-    - Labels and timestamps: kept from first frame
-    """
-    out = {}
-
-    out["target"] = torch.cat([f["target"] for f in frames], dim=1)
-    out["condition"] = torch.cat([f["condition"] for f in frames], dim=1)
-
-    out["second_of_day"] = torch.cat([f["second_of_day"] for f in frames], dim=0)
-    out["day_of_year"] = torch.cat([f["day_of_year"] for f in frames], dim=0)
-
-    # Current network uses a single label regardless of time length
-    # and all frames are assumed to have the same dataset label
-    out["labels"] = frames[0]["labels"]
-    out["timestamp"] = frames[0]["timestamp"]
-
-    return frame_masker(out)
 
 
 def _transform(
@@ -241,10 +249,23 @@ def _transform(
     if frame_masker is None:
         raise ValueError("Frame masker must be provided in video mode")
 
-    return combine_and_mask_frames(frames, frame_masker)
+    out = {}
+
+    out["target"] = torch.cat([f["target"] for f in frames], dim=1)
+    out["condition"] = torch.cat([f["condition"] for f in frames], dim=1)
+
+    out["second_of_day"] = torch.cat([f["second_of_day"] for f in frames], dim=0)
+    out["day_of_year"] = torch.cat([f["day_of_year"] for f in frames], dim=0)
+
+    # Current network uses a single label regardless of time length
+    # and all frames are assumed to have the same dataset label
+    out["labels"] = frames[0]["labels"]
+    out["timestamp"] = frames[0]["timestamp"]
+
+    return frame_masker(out)
 
 
-def encode_task(
+def _encode_task(
     label: int,
     mean: np.ndarray,
     scale: np.ndarray,
@@ -252,6 +273,7 @@ def encode_task(
     data: dict[tuple[str, int | None], np.ndarray],
     *,
     sst_input: bool,
+    config: VariableConfig,
     is_land: np.ndarray | None = None,
 ):
     """
@@ -275,7 +297,7 @@ def encode_task(
     elif label == 0:
         _convert_icon_to_standard(data, is_land)
 
-    arr = collect_fields(data)
+    arr = _collect_fields(_get_index(config), data)
     arr = (arr - mean) / scale
 
     if sst_input:
@@ -301,7 +323,12 @@ def encode_task(
         "second_of_day": torch.tensor([second_of_day]),
         "day_of_year": torch.tensor([day_of_year]),
     }
-    out["timestamp"] = cftime_to_timestamp(time)
+    out["timestamp"] = _cftime_to_timestamp(time)
+
+    # Add TC labels if available in the data dictionary
+    if IBTracs.KEY in data:
+        # Reorder to match model's pixel ordering (HEALPIX_PAD_XY)
+        out["classifier_labels"] = reorder(data[IBTracs.KEY])
 
     return out
 
@@ -318,159 +345,6 @@ def _convert_icon_to_standard(data, is_land):
     for (name, level), value in list(data.items()):
         if level != NO_LEVEL:
             data[(name, level // 100)] = value
-
-
-def _get_dataset_wrapper(
-    times,
-    loaders,
-    transform: Callable,
-    *,
-    rank: int = 0,
-    world_size: int = 1,
-    infinite: bool,
-    shuffle: bool = True,
-    chunk_size: int = 8,
-    frame_step: int = 1,  # Spacing of consecutive frames in the dataset
-    time_length: int = 1,
-    map_style: bool = False,
-) -> TimeMergedDataset | TimeMergedMapStyle:
-    if map_style:
-        # Used for video validation/inference
-        wrapper = TimeMergedMapStyle(
-            times,
-            time_loaders=loaders,
-            frame_step=frame_step,
-            time_length=time_length,
-            transform=transform,
-        )
-    else:
-        wrapper = TimeMergedDataset(
-            times,
-            time_loaders=loaders,
-            transform=transform,
-            rank=rank,
-            world_size=world_size,
-            infinite=infinite,
-            shuffle=shuffle,
-            chunk_size=chunk_size,
-            frame_step=frame_step,
-            time_length=time_length,
-        )
-    return wrapper
-
-
-def _get_dataset_icon(
-    *,
-    split: str = "",
-    rank: int = 0,
-    world_size: int = 1,
-    sst_input: bool = True,
-    infinite: bool,
-    shuffle: bool = True,
-    chunk_size: int = 8,
-    time_step: int = 1,
-    time_length: int = 1,
-    frame_masker: Optional[Callable] = None,
-):
-    # min and max times
-    # (Pdb) p loaders[1].times[[0,-1]]
-    # CFTimeIndex([2020-01-20 00:30:00, 2025-07-22 00:00:00],
-    #            dtype='object',
-    #            length=2,
-    #            calendar='proleptic_gregorian',
-    #            freq=None)
-    # (Pdb) p loaders[0].times[[0,-1]]
-    # DatetimeIndex(['2020-01-20 03:00:00', '2025-07-22 00:00:00'], dtype='datetime64[s]', freq=None)
-    # TODO add linear interpolation to DataWrapper with 30 min data
-    metadata = DATASET_METADATA["icon"]
-    valid_times = pd.date_range(metadata.start, metadata.end, freq=metadata.freq)
-    loaders = [
-        ZarrLoader(
-            path=config.V6_ICON_ZARR,
-            storage_options=get_storage_options(config.V6_ICON_ZARR_PROFILE),
-            variables_3d=["T", "U", "V", "Z"],
-            variables_2d=["tcwv"],
-            level_coord_name="level",
-            # convert levels to Pa
-            levels=[lev * 100 for lev in LEVELS],
-        ),
-        ZarrLoader(
-            path=config.RAW_DATA_URL_6,
-            storage_options=get_storage_options(config.RAW_DATA_PROFILE),
-            levels=[],
-            variables_3d=[],
-            variables_2d=[
-                "tas",
-                "uas",
-                "vas",
-                "cllvi",
-                "clivi",
-                "rlut",
-                "rsut",
-                "pres_msl",
-                "pr",
-                "rsds",
-                "ts",
-                "sic",
-            ],
-        ),
-        ZarrLoader(
-            path=config.SST_MONMEAN_DATA_URL_6,
-            storage_options=get_storage_options(config.SST_MONMEAN_DATA_PROFILE),
-            levels=[],
-            variables_3d=[],
-            variables_2d=["ts_monmean"],
-            time_sel_method="nearest",
-        ),
-    ]
-
-    train_times = valid_times[valid_times < "2024-03-06 15:00:00"]
-    test_times = valid_times[valid_times >= "2024-03-06 15:00:00"]
-    times = {"train": train_times, "test": test_times, "": valid_times}[split]
-
-    if times.size == 0:
-        raise RuntimeError("No times are selected.")
-
-    # open land data
-    land_data = zarr.open_group(
-        config.LAND_DATA_URL_6,
-        storage_options=get_storage_options(config.LAND_DATA_PROFILE),
-        mode="r",
-    )
-    land_fraction = land_data["land_fraction"][:]
-
-    label = LABELS.index("icon")
-
-    encode_frame = functools.partial(
-        encode_task,
-        label,
-        get_mean(),
-        get_std(),
-        sst_input=sst_input,
-        is_land=land_fraction > 0,
-    )
-
-    transform = functools.partial(
-        _transform,
-        encode_frame=encode_frame,
-        frame_masker=frame_masker,
-    )
-
-    frame_step = _compute_frame_step(metadata, time_step, time_length)
-
-    return _get_dataset_wrapper(
-        times,
-        loaders,
-        transform,
-        rank=rank,
-        world_size=world_size,
-        infinite=infinite,
-        shuffle=shuffle,
-        chunk_size=chunk_size,
-        frame_step=frame_step,
-        time_length=time_length,
-        map_style=time_length > 1 and split != "train",
-    )
 
 
 def _convert_era5_to_standard(data):
@@ -508,6 +382,7 @@ def _convert_era5_to_standard(data):
         "v": "V",
         "t": "T",
         "z": "Z",
+        "q": "Q",
         "tosbcs": MONTHLY_SST,
     }
     for (name, level), value in list(data.items()):
@@ -515,95 +390,12 @@ def _convert_era5_to_standard(data):
             data[(fields_out_map[name], level)] = value
 
 
-def _get_dataset_era5(
-    *,
-    split: str = "",
-    rank: int = 0,
-    world_size: int = 1,
-    sst_input: bool = True,
-    infinite: bool,
-    shuffle: bool = True,
-    chunk_size: int = 48,
-    time_step: int = 1,
-    time_length: int = 1,
-    frame_masker: Optional[Callable] = None,
-):
-    target_data_loader = ZarrLoader(
-        path=config.V6_ERA5_ZARR,
-        storage_options=get_storage_options(config.V6_ERA5_ZARR_PROFILE),
-        variables_3d=["u", "v", "t", "z"],
-        variables_2d=[
-            "sstk",
-            "ci",
-            "msl",
-            "tp",
-            "10u",
-            "10v",
-            "2t",
-            "tclw",
-            "tciw",
-            "tcwv",
-        ],
-        level_coord_name="levels",
-        levels=LEVELS,
-    )
-
-    loaders = [target_data_loader]
-
-    if sst_input:
-        grid = earth2grid.healpix.Grid(
-            HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
-        )
-        loaders.append(
-            AmipSSTLoader(
-                grid,
-            )
-        )
-
-    metadata = DATASET_METADATA["era5"]
-    valid_times = pd.date_range(metadata.start, metadata.end, freq=metadata.freq)
-
-    train_times = valid_times[valid_times < "2018"]
-    test_times = valid_times[valid_times.year == 2018]
-    times = {"train": train_times, "test": test_times, "": valid_times}[split]
-
-    if times.size == 0:
-        raise RuntimeError("No times are selected.")
-
-    label = LABELS.index("era5")
-
-    encode_frame = functools.partial(
-        encode_task, label, get_mean(), get_std(), sst_input=sst_input
-    )
-
-    transform = functools.partial(
-        _transform,
-        encode_frame=encode_frame,
-        frame_masker=frame_masker,
-    )
-
-    frame_step = _compute_frame_step(metadata, time_step, time_length)
-
-    return _get_dataset_wrapper(
-        times,
-        loaders,
-        transform,
-        rank=rank,
-        world_size=world_size,
-        infinite=infinite,
-        shuffle=shuffle,
-        chunk_size=chunk_size,
-        frame_step=frame_step,
-        time_length=time_length,
-        map_style=time_length > 1 and split != "train",
-    )
-
-
 def _encode_amip(
     time: cftime.DatetimeGregorian,
     data: dict[tuple[str, int | None], np.ndarray],
     *,
     label: int,
+    variable_config: VariableConfig,
 ):
     """
 
@@ -615,6 +407,7 @@ def _encode_amip(
         output dict, condition and target in HEALPIX_PAD_XY order
 
     """
+    index = _get_index(variable_config)
     labels = torch.nn.functional.one_hot(torch.tensor(label), num_classes=MAX_CLASSES)
 
     sst = data[("tosbcs", NO_LEVEL)]
@@ -632,9 +425,9 @@ def _encode_amip(
     day_of_year = (time - year_start) / datetime.timedelta(seconds=86400)
 
     nan_channels = [
-        INDEX.get_loc((channel, -1)) for channel in ["rlut", "rsut", "rsds"]
+        index.get_loc((channel, -1)) for channel in ["rlut", "rsut", "rsds"]
     ]
-    target = np.zeros((INDEX.size, 1, 4**HPX_LEVEL * 12), dtype=np.float32)
+    target = np.zeros((index.size, 1, 4**HPX_LEVEL * 12), dtype=np.float32)
     target[nan_channels, ...] = np.nan
 
     out = {
@@ -644,66 +437,209 @@ def _encode_amip(
         "second_of_day": torch.tensor([second_of_day]),
         "day_of_year": torch.tensor([day_of_year]),
     }
-    out["timestamp"] = cftime_to_timestamp(time)
+    out["timestamp"] = _cftime_to_timestamp(time)
+    # Add TC labels if available in the data dictionary
+    if IBTracs.KEY in data:
+        # Reorder to match model's pixel ordering (HEALPIX_PAD_XY)
+        out["classifier_labels"] = reorder(data[IBTracs.KEY])
 
     return out
 
 
-def get_amip_dataset(
-    rank: int = 0,
-    world_size: int = 1,
-    infinite: bool = False,
+def _loader_from_catalog(dataset: catalog._Zarr, **kwargs) -> ZarrLoader:
+    return ZarrLoader(
+        path=dataset.path, storage_options=dataset.storage_options, **kwargs
+    )
+
+
+def _get_loaders(
+    dataset: str,
     *,
-    split,
-    sst_input,
-    shuffle,
-    chunk_size: int = 48,
-    time_step: int = 1,
-    time_length: int = 1,
-    frame_masker: Optional[Callable] = None,
+    sst_input: bool = True,
+    ibtracs_input: bool = False,
+    variable_config: VariableConfig = _default_config,
 ):
-    if not sst_input:
-        raise ValueError("AMIP inference only works with SST input.")
+    """Get the appropriate loaders for a given dataset.
 
-    if shuffle:
-        raise NotImplementedError("Shuffling not implemented for AMIP dataset.")
+    Args:
+        dataset: The dataset name ("icon", "era5", or "amip")
+        sst_input: Whether to include SST input
+        ibtracs_input: Whether to include IBTrACS input
+        variable_config: Variable configuration for the dataset
 
-    metadata = DATASET_METADATA["amip"]
-    times = pd.date_range(metadata.start, metadata.end, freq=metadata.freq)
+    Returns:
+        List of loaders for the specified dataset
+    """
 
-    grid = earth2grid.healpix.Grid(
-        HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
-    )
-    loaders = [
-        AmipSSTLoader(
-            grid,
+    if dataset == "icon":
+        loaders = [
+            _loader_from_catalog(
+                catalog.icon_plevel(),
+                variables_3d=["T", "U", "V", "Z", "Q"],
+                variables_2d=["tcwv"],
+                level_coord_name="level",
+                # convert levels to Pa
+                levels=[lev * 100 for lev in variable_config.levels],
+            ),
+            _loader_from_catalog(
+                catalog.icon(level=6, freq="PT30M"),
+                levels=[],
+                variables_3d=[],
+                variables_2d=[
+                    "tas",
+                    "uas",
+                    "vas",
+                    "cllvi",
+                    "clivi",
+                    "rlut",
+                    "rsut",
+                    "pres_msl",
+                    "pr",
+                    "rsds",
+                    "ts",
+                    "sic",
+                ],
+            ),
+            _loader_from_catalog(
+                catalog.icon_sst_monmean(),
+                levels=[],
+                variables_3d=[],
+                variables_2d=["ts_monmean"],
+                time_sel_method="nearest",
+            ),
+        ]
+
+    elif dataset == "era5":
+        target_data_loader = _loader_from_catalog(
+            catalog.era5_hpx6(),
+            variables_3d=["u", "v", "t", "z", "q"],
+            variables_2d=[
+                "sstk",
+                "ci",
+                "msl",
+                "tp",
+                "10u",
+                "10v",
+                "2t",
+                "tclw",
+                "tciw",
+                "tcwv",
+            ],
+            level_coord_name="levels",
+            levels=variable_config.levels,
         )
-    ]
-    encode_frame = functools.partial(_encode_amip, label=LABELS.index("era5"))
 
-    transform = functools.partial(
-        _transform,
-        encode_frame=encode_frame,
-        frame_masker=frame_masker,
-    )
+        loaders = [target_data_loader]
 
-    frame_step = _compute_frame_step(metadata, time_step, time_length)
+        if sst_input:
+            grid = earth2grid.healpix.Grid(
+                HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
+            )
+            loaders.append(
+                AmipSSTLoader(
+                    grid,
+                )
+            )
+        if ibtracs_input:
+            loaders.append(IBTracs())
 
-    # TODO AMIP infernece only works with era5
+    elif dataset == "amip":
+        if not sst_input:
+            raise ValueError("AMIP inference only works with SST input.")
 
-    return _get_dataset_wrapper(
-        times,
-        loaders,
-        transform,
-        rank=rank,
-        world_size=world_size,
-        infinite=infinite,  # todo check
-        shuffle=False,
-        chunk_size=chunk_size,
-        frame_step=frame_step,
-        time_length=time_length,
-        map_style=time_length > 1,
-    )
+        grid = earth2grid.healpix.Grid(
+            HPX_LEVEL, pixel_order=earth2grid.healpix.PixelOrder.NEST
+        )
+        loaders = [
+            AmipSSTLoader(
+                grid,
+            )
+        ]
+
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    return loaders
+
+
+def _get_frame_encoder(
+    dataset: str,
+    *,
+    sst_input: bool = True,
+    variable_config: VariableConfig = _default_config,
+):
+    """Get the appropriate transform function for a given dataset.
+
+    Args:
+        dataset: The dataset name ("icon", "era5", or "amip")
+        sst_input: Whether to include SST input
+        frame_masker: Optional frame masker for video processing
+        variable_config: Variable configuration for the dataset
+
+    Returns:
+        Transform function for the specified dataset
+    """
+    if dataset == "icon":
+        label = LABELS.index("icon")
+
+        # open land data
+        land_data = catalog.icon_land(level=6, freq="P1D").to_zarr()
+        land_fraction = land_data["land_fraction"][:]
+        encode_frame = functools.partial(
+            _encode_task,
+            label,
+            get_mean(variable_config),
+            get_std(variable_config),
+            sst_input=sst_input,
+            is_land=land_fraction > 0,
+            config=variable_config,
+        )
+
+    elif dataset == "era5":
+        label = LABELS.index("era5")
+        encode_frame = functools.partial(
+            _encode_task,
+            label,
+            get_mean(variable_config),
+            get_std(variable_config),
+            sst_input=sst_input,
+            config=variable_config,
+        )
+
+    elif dataset == "amip":
+        if not sst_input:
+            raise ValueError("AMIP inference only works with SST input.")
+
+        encode_frame = functools.partial(
+            _encode_amip, label=LABELS.index("era5"), variable_config=variable_config
+        )
+
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    return encode_frame
+
+
+def _get_splits(dataset: str):
+    # Get metadata for the dataset
+    metadata = DATASET_METADATA[dataset]
+    valid_times = pd.date_range(metadata.start, metadata.end, freq=metadata.freq)
+
+    # Handle time splitting based on dataset
+    if dataset == "icon":
+        train_times = valid_times[valid_times < "2024-03-06 15:00:00"]
+        test_times = valid_times[valid_times >= "2024-03-06 15:00:00"]
+    elif dataset == "era5":
+        train_times = valid_times[valid_times < "2018"]
+        test_times = valid_times[valid_times.year == 2018]
+    elif dataset == "amip":
+        # AMIP doesn't have train/test split, use all times
+        train_times = valid_times
+        test_times = valid_times
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    return {"train": train_times, "test": test_times, "": valid_times}
 
 
 def get_dataset(
@@ -714,32 +650,83 @@ def get_dataset(
     world_size: int = 1,
     sst_input: bool = True,
     infinite: bool = False,
+    ibtracs_input: bool = False,
     shuffle: bool = True,
     chunk_size: int = 8,
     time_step: int = 1,  # in hours
     time_length: int = 1,
     frame_masker: Optional[FrameMasker] = None,
+    variable_config: VariableConfig = _default_config,
+    map_style: bool = False,
 ) -> TimeMergedDataset | TimeMergedMapStyle:
-    dataset_func = {
-        "icon": _get_dataset_icon,
-        "era5": _get_dataset_era5,
-        "amip": get_amip_dataset,
-    }[dataset]
-
-    ds = dataset_func(
-        split=split,
-        rank=rank,
-        world_size=world_size,
+    # Get the appropriate loaders for the dataset
+    loaders = _get_loaders(
+        dataset,
         sst_input=sst_input,
-        infinite=infinite,
-        shuffle=shuffle,
-        chunk_size=chunk_size,
-        time_step=time_step,
-        time_length=time_length,
+        ibtracs_input=ibtracs_input,
+        variable_config=variable_config,
+    )
+    times = _get_splits(dataset)[split]
+    if times.size == 0:
+        raise RuntimeError("No times are selected.")
+
+    # Compute frame step
+    frame_step = _compute_frame_step(DATASET_METADATA[dataset], time_step, time_length)
+
+    # Handle special cases for AMIP dataset
+    if dataset == "amip":
+        # if shuffle:
+        #     raise NotImplementedError("Shuffling not implemented for AMIP dataset.")
+        # shuffle = False
+        # map_style = time_length > 1
+        pass
+    else:
+        map_style = map_style or (time_length > 1 and split != "train")
+
+    transform = functools.partial(
+        _transform,
+        encode_frame=_get_frame_encoder(
+            dataset,
+            sst_input=sst_input,
+            variable_config=variable_config,
+        ),
         frame_masker=frame_masker,
     )
 
-    ds.batch_info = get_batch_info(time_step=time_step, time_unit=TimeUnit.HOUR)
+    # Create and return the dataset
+    if map_style:
+        # Used for video validation/inference
+        ds = TimeMergedMapStyle(
+            times,
+            time_loaders=loaders,
+            frame_step=frame_step,
+            time_length=time_length,
+            transform=transform,
+        )
+    else:
+        ds = TimeMergedDataset(
+            times,
+            time_loaders=loaders,
+            transform=transform,
+            rank=rank,
+            world_size=world_size,
+            infinite=infinite,
+            shuffle=shuffle,
+            chunk_size=chunk_size,
+            frame_step=frame_step,
+            time_length=time_length,
+        )
+
+    ds.batch_info = get_batch_info(
+        config=variable_config, time_step=time_step, time_unit=TimeUnit.HOUR
+    )
     ds.calendar = "standard"
     ds.time_units = "seconds since 1970-1-1 0:0:0"
     return ds
+
+
+def guess_variable_config(channels: list[str]) -> str:
+    for v in VARIABLE_CONFIGS:
+        if get_batch_info(VARIABLE_CONFIGS[v]).channels == channels:
+            return v
+    raise ValueError()

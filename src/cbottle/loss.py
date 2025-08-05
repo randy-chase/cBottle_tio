@@ -18,7 +18,17 @@
 import torch
 import scipy.stats
 import numpy as np
-from typing import Literal
+import dataclasses
+from typing import Literal, Callable
+import cbottle.models.networks
+
+
+@dataclasses.dataclass
+class Output:
+    total: torch.Tensor
+    denoising: torch.Tensor
+    sigma: torch.Tensor
+    classification: torch.Tensor | None = None
 
 
 # ----------------------------------------------------------------------------
@@ -33,8 +43,10 @@ class EDMLoss:
         distribution: Literal["log_normal", "log_uniform", "power"] = "log_normal",
         sigma_max=1000.0,
         sigma_min=0.02,
+        classifier_weight: float = 0.1,
     ):
         self.distribution = distribution
+        self.classifier_weight = classifier_weight
         self.P_mean = P_mean
         self.P_std = P_std
         self.sigma_data = sigma_data
@@ -90,7 +102,12 @@ class EDMLoss:
             )
             return p_log_s / sigma
 
-    def __call__(self, net, images):
+    def __call__(
+        self,
+        net: Callable[..., cbottle.models.networks.Output],
+        images,
+        classifier_labels=None,
+    ) -> Output:
         if self.distribution == "log_normal":
             sigma = self._sample_sigma_like_v1(images)
         elif self.distribution == "log_uniform":
@@ -105,10 +122,34 @@ class EDMLoss:
         weight = (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
         y = images
         n = torch.randn_like(y) * sigma
-        D_yn = net(torch.where(mask, y + n, 0), sigma)
-        loss = weight * ((D_yn - torch.where(mask, y, 0)) ** 2)
-        loss = torch.where(mask, loss, 0) / mask.float().mean()
-        return loss
+        out = net(torch.where(mask, y + n, 0), sigma)
+        denoising_loss = weight * ((out.out - torch.where(mask, y, 0)) ** 2)
+        denoising_loss = torch.where(mask, denoising_loss, 0) / mask.float().mean()
+
+        if out.logits is None:
+            return Output(total=denoising_loss, denoising=denoising_loss, sigma=sigma)
+        else:
+            if classifier_labels is not None:
+                classification_loss = (
+                    torch.nn.functional.binary_cross_entropy_with_logits(
+                        out.logits, classifier_labels
+                    )
+                )
+                total_loss = (
+                    denoising_loss + self.classifier_weight * classification_loss
+                )
+            else:
+                # Add a dummy term to ensure classifier_out participates in the loss
+                # Otherwise torch.distributed will throw an error about empty gradients in the ICON case
+                classification_loss = 0 * out.logits.sum()
+                total_loss = denoising_loss + classification_loss
+
+            return Output(
+                total=total_loss,
+                denoising=denoising_loss,
+                classification=classification_loss,
+                sigma=sigma,
+            )
 
 
 class RegressLoss:

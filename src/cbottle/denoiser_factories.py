@@ -17,12 +17,16 @@ import torch
 from enum import Enum, auto
 from typing import Optional
 from cbottle.diffusion_samplers import edm_sampler_steps
+from typing import Callable
+
+DenoiserT = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 class DenoiserType(Enum):
     mask_filling = auto()  # When the input contains NaNs, uses mask filling denoiser
     infill = auto()  # Fill in the Nans given the not nans.
     standard = auto()
+    guided = auto()  # Uses classifier guidance to steer the denoising process
 
 
 def create_standard_denoiser(
@@ -41,7 +45,7 @@ def create_standard_denoiser(
             condition=condition,
             second_of_day=second_of_day,
             day_of_year=day_of_year,
-        )
+        ).out
 
     D.round_sigma = net.round_sigma
     D.sigma_max = net.sigma_max
@@ -67,7 +71,7 @@ def create_mask_filling_denoiser(
             condition=condition,
             second_of_day=second_of_day,
             day_of_year=day_of_year,
-        )
+        ).out
 
         D = net(
             torch.where(mask, x_hat, 0),
@@ -76,7 +80,7 @@ def create_mask_filling_denoiser(
             condition=condition,
             second_of_day=second_of_day,
             day_of_year=day_of_year,
-        )
+        ).out
 
         # compute icon
         return torch.where(mask, D, D_when_nan)
@@ -117,7 +121,7 @@ def _get_infilling_denoiser(
             condition=condition,
             second_of_day=second_of_day,
             day_of_year=day_of_year,
-        )
+        ).out
         return D
 
     return denoise
@@ -154,6 +158,69 @@ def create_infilling_denoiser(
     return D
 
 
+def get_guidance(guidance_data, logits, x_hat, denoised, t_hat) -> float | torch.Tensor:
+    guidance_mask = ~torch.isnan(guidance_data)
+    valid_logits = logits[guidance_mask]
+    valid_targets = guidance_data[guidance_mask]
+
+    if valid_logits.numel() > 0:
+        classifier_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            valid_logits, valid_targets
+        )
+        classifier_grad = torch.autograd.grad(
+            classifier_loss, x_hat, retain_graph=False
+        )[0]
+
+        # Match norms for stable guidance
+        score = (x_hat - denoised) / t_hat
+        score_norm = torch.norm(score)
+        classifier_norm = torch.norm(classifier_grad)
+
+        # Avoid division by zero
+        if classifier_norm > 0:
+            scale = score_norm / classifier_norm
+        else:
+            scale = 0.0
+
+        # Apply guided denoising
+        return -t_hat * scale * classifier_grad
+    else:
+        return 0
+
+
+def create_guided_denoiser(
+    net,
+    *,
+    second_of_day,
+    day_of_year,
+    labels,
+    condition,
+    guidance_data,
+    guidance_scale: float = 0.03,
+):
+    def D(x_hat, t_hat):
+        x_hat.requires_grad_(True)
+        out = net(
+            x_hat,
+            t_hat,
+            labels,
+            condition=condition,
+            second_of_day=second_of_day,
+            day_of_year=day_of_year,
+        )
+
+        denoised = out.out
+        if guidance_scale != 0:
+            d_guide = get_guidance(guidance_data, out.logits, x_hat, denoised, t_hat)
+            denoised = denoised + guidance_scale * d_guide
+        return denoised
+
+    D.round_sigma = net.round_sigma
+    D.sigma_max = net.sigma_max
+    D.sigma_min = net.sigma_min
+    return D
+
+
 def get_denoiser(
     net,
     images,
@@ -165,10 +232,25 @@ def get_denoiser(
     denoiser_type: DenoiserType = DenoiserType.standard,
     sigma_max: float = 80.0,
     labels_when_nan: Optional[torch.Tensor] = None,
+    guidance_data: Optional[torch.Tensor] = None,
+    guidance_scale: float = 0.0,
 ):
     mask = ~torch.isnan(images)
 
-    if denoiser_type == DenoiserType.infill:
+    # Regular single-model denoiser logic below
+    if denoiser_type == DenoiserType.guided:
+        if guidance_data is None:
+            raise ValueError("guidance_data must be provided for guided denoiser")
+        D = create_guided_denoiser(
+            net=net,
+            labels=labels,
+            condition=condition,
+            second_of_day=second_of_day,
+            day_of_year=day_of_year,
+            guidance_data=guidance_data,
+            guidance_scale=guidance_scale,
+        )
+    elif denoiser_type == DenoiserType.infill:
         D = create_infilling_denoiser(
             net=net,
             mask=mask,

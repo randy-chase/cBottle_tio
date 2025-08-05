@@ -1,0 +1,16 @@
+xarray.Dataset {
+dimensions:
+	time = 1 ;
+	variable = 2 ;
+	lat = 721 ;
+	lon = 1440 ;
+
+variables:
+	datetime64[ns] time(time) ;
+	<U4 variable(variable) ;
+	float64 lat(lat) ;
+	float64 lon(lon) ;
+	float64 sample(time, variable, lat, lon) ;
+
+// global attributes:
+}

@@ -16,6 +16,7 @@ import abc
 import copy
 import dataclasses
 import json
+import gc
 import os
 import pickle
 import time
@@ -226,15 +227,23 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
 
     def resume_from_state(self, resume_state_dump, optimizer=True, require_all=True):
         dist.print0(f'Loading training state from "{resume_state_dump}"...')
-        with cbottle.checkpointing.Checkpoint(resume_state_dump, "r") as checkpoint:
-            with checkpoint.open("net_state.pth", "r") as f:
-                net_state = torch.load(f, weights_only=True)
-                self.net.load_state_dict(net_state, strict=require_all)
 
+        with cbottle.checkpointing.Checkpoint(resume_state_dump, "r") as checkpoint:
+            self._load_net_state(checkpoint, require_all)
+            gc.collect()
             if optimizer and self.optimizer is not None:
-                with checkpoint.open("optimizer_state.pth", "r") as f:
-                    optimizer_state = torch.load(f)
-                    self.optimizer.load_state_dict(optimizer_state)
+                self._load_optimizer_state(checkpoint)
+
+    def _load_net_state(self, checkpoint, require_all):
+        with checkpoint.open("net_state.pth", "r") as f:
+            net_state = torch.load(f, weights_only=True, map_location="cpu")
+            self.net.load_state_dict(net_state, strict=require_all)
+
+    def _load_optimizer_state(self, checkpoint):
+        with checkpoint.open("optimizer_state.pth", "r") as f:
+            # load to cpu to avoid copies in gpu memory
+            optimizer_state = torch.load(f, map_location="cpu")
+            self.optimizer.load_state_dict(optimizer_state)
 
     def train_step(
         self, *, condition=None, target, labels, augment_labels=None, **kwargs
@@ -406,6 +415,7 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
             os.path.join(self.run_dir, state_filename), "w"
         ) as checkpoint:
             checkpoint.write_model(self.net)
+            checkpoint.write_batch_info(self.dataset_obj.batch_info)
             with checkpoint.open("optimizer_state.pth", "w") as f:
                 torch.save(self.optimizer.state_dict(), f)
 
@@ -447,12 +457,14 @@ class TrainingLoopBase(loop.TrainingLoopBase, abc.ABC):
     @classmethod
     def from_json(cls, path):
         with open(path) as f:
-            cls.loads(f.read())
+            return cls.loads(f.read())
 
     @classmethod
     def from_rundir(cls, run_dir):
         path = os.path.join(run_dir, TRAINER_METADATA_FILENAME)
-        return cls.from_json(path)
+        loop = cls.from_json(path)
+        loop.run_dir = run_dir
+        return loop
 
     def dumps(self):
         fields = dataclasses.asdict(self)

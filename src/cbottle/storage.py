@@ -14,6 +14,11 @@
 # limitations under the License.
 import configparser
 import os
+import shutil
+import tempfile
+import sys
+
+import fsspec
 
 DEFAULT_PATH = os.path.expanduser("~/.config/rclone/rclone.conf")
 
@@ -54,3 +59,16 @@ def get_storage_options(remote_name, config_path=DEFAULT_PATH):
         secret=secret_key,
         client_kwargs={"endpoint_url": endpoint_url} if endpoint_url else None,
     )
+
+
+def ensure_downloaded(url, local):
+    if os.path.exists(local):
+        return
+
+    fs = fsspec.filesystem("http")
+    print(f"Downloading from {url} to {local}", file=sys.stderr)
+    with tempfile.TemporaryDirectory() as d:
+        tmpfile = os.path.join(d, "file")
+        fs.get(url, tmpfile)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        shutil.move(tmpfile, local)

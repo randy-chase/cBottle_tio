@@ -36,7 +36,7 @@ caribbean_se_us_proj = cartopy.crs.LambertConformal(
 )
 
 
-projections = {
+_projections = {
     "PlateCarree": cartopy.crs.PlateCarree(),
     "Robinson": cartopy.crs.Robinson(),
     "Robinson_180": cartopy.crs.Robinson(180),
@@ -45,11 +45,13 @@ projections = {
     "north_pole": cartopy.crs.NorthPolarStereo(),
     "carib": caribbean_se_us_proj,
     "warm_pool": cartopy.crs.PlateCarree(),
+    "conus_large": cartopy.crs.PlateCarree(),
 }
 
-extents = {
+_extents = {
     "carib": [-100, -60, 10, 40],
     "warm_pool": [85, 160, -15, 20],
+    "conus_large": [-130, -60, 18, 50],
 }
 
 
@@ -115,25 +117,33 @@ def latlon_to_grid_extents(proj, extents):
 def visualize(
     x,
     region="Robinson",
+    projection=None,
+    extents=None,
     nest=False,
     hpxpad=False,
     pos=None,
     n=None,
     title=None,
     colorbar_label=None,
-    lat0=0,
     cmap=None,
     coastlines_color="k",
     add_colorbar=True,
     extend=None,
     nlat=256,
     nlon=512,
+    border=False,
+    kind="pcolormesh",
+    interp_method="bilinear",
     **kw,
 ):
     if x.ndim != 1:
         raise ValueError(f"Expected 1D input but received {x.ndim}.")
 
-    crs = projections[region]
+    if projection is None:
+        crs = _projections[region]
+        extents = _extents.get(region, None)
+    else:
+        crs = projection
 
     if nest:
         pixel_order = healpix.PixelOrder.NEST
@@ -144,18 +154,28 @@ def visualize(
 
     hpx = healpix.Grid(healpix.npix2level(x.shape[-1]), pixel_order=pixel_order)
     lat, lon, xx, yy = create_regular_grid_in_projection(
-        crs, nlat, nlon, extents=extents.get(region, None)
+        crs, nlat, nlon, extents=extents
     )
     cmap = plt.get_cmap(cmap, n)
     mask = ~np.isnan(lat)
     latm = lat[mask]
     lonm = lon[mask]
     x = torch.as_tensor(x)
-    regrid = hpx.get_bilinear_regridder_to(latm, lonm)
-    regrid.to(x)
     out = torch.zeros_like(torch.tensor(lat)).to(x)
-    out[mask] = regrid(x)
-    out[~mask] = torch.nan
+    if interp_method == "bilinear":
+        regrid = hpx.get_bilinear_regridder_to(latm, lonm)
+        regrid.to(x)
+        out[mask] = regrid(x)
+        out[~mask] = torch.nan
+    elif interp_method == "bin":
+        pix = hpx.ang2pix(
+            torch.as_tensor(lonm, device=x.device),
+            torch.as_tensor(latm, device=x.device),
+        )
+        out[mask] = x[pix]
+        out[~mask] = torch.nan
+    else:
+        raise ValueError(f"Invalid interpolation method: {interp_method}")
 
     if isinstance(pos, tuple):
         subplot_args = pos
@@ -165,8 +185,13 @@ def visualize(
         subplot_args = ()
 
     ax = plt.subplot(*subplot_args, projection=crs)
-    im = ax.pcolormesh(xx, yy, out.cpu(), transform=crs, cmap=cmap, **kw)
+    plot_func = getattr(ax, kind)
+    im = plot_func(xx, yy, out.cpu(), transform=crs, cmap=cmap, **kw)
     ax.coastlines(color=coastlines_color)
+
+    if border:
+        ax.add_feature(cartopy.feature.BORDERS, linewidth=1, edgecolor="lightgray")
+        ax.add_feature(cartopy.feature.STATES, linewidth=0.4, edgecolor="lightgray")
 
     cb = None
     if add_colorbar:

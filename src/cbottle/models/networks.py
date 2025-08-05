@@ -16,23 +16,44 @@
 """Model architectures and preconditioning schemes used in the paper
 "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
-from typing import Type, Literal, Optional
+import dataclasses
+import importlib
 import inspect
+import warnings
+from typing import Literal, Optional, Type
 
 import einops
 import numpy as np
 import torch
 import torch.utils.checkpoint
+from earth2grid.healpix import (
+    HEALPIX_PAD_XY,
+    Grid,
+    PaddingBackends,
+    PixelOrder,
+    pad_backend,
+)
+from earth2grid.healpix import pad as healpix_pad
 from torch.nn.functional import silu
 
 from cbottle.domain import Domain, HealPixDomain, PatchedHealpixDomain
 from cbottle.models.embedding import (
     CalendarEmbedding,
-    PositionalEmbedding,
     FourierEmbedding,
+    PositionalEmbedding,
 )
-from earth2grid.healpix import pad as healpix_pad, Grid, HEALPIX_PAD_XY
-from earth2grid.healpix import PixelOrder
+
+# Import apex GroupNorm if installed only
+_is_apex_available = False
+if torch.cuda.is_available():
+    try:
+        apex_gn_module = importlib.import_module("apex.contrib.group_norm")
+        ApexGroupNorm = getattr(apex_gn_module, "GroupNorm")
+        _is_apex_available = True
+    except ImportError:
+        pass
+
+
 # ----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
 
@@ -163,6 +184,248 @@ class Conv2d(torch.nn.Module):
         return x
 
 
+# ----------------------------------------------------------------------------
+# Unified GroupNorm interface to PyTorch and Apex GroupNorm implementations.
+# TODO: deduplicate by importing from physicsnemo after the following issues are fixed:
+# https://github.com/NVIDIA/physicsnemo/issues/972
+# https://github.com/NVIDIA/physicsnemo/issues/1001
+
+
+def group_norm_factory(
+    num_channels: int,
+    num_groups: int = 32,
+    min_channels_per_group: int = 4,
+    eps: float = 1e-5,
+    use_apex_gn: bool = False,
+    fused_act: bool = False,
+    act: str = None,
+    amp_mode: bool = False,
+):
+    """
+    A workaround for checkpoint incompatibility with use_apex_gn=True and use_apex_gn=False
+    """
+    if fused_act and act is None:
+        raise ValueError("'act' must be specified when 'fused_act' is set to True.")
+
+    num_groups_ = min(
+        num_groups,
+        (num_channels + min_channels_per_group - 1) // min_channels_per_group,
+    )
+    if num_channels % num_groups_ != 0:
+        raise ValueError(
+            "num_channels must be divisible by num_groups or min_channels_per_group"
+        )
+    act = act.lower() if act else act
+    if use_apex_gn and not _is_apex_available:
+        raise ValueError("'apex' is not installed, set `use_apex_gn=False`")
+    if use_apex_gn:
+        if act:
+            return ApexGroupNorm(
+                num_groups=num_groups_,
+                num_channels=num_channels,
+                eps=eps,
+                affine=True,
+                act=act,
+            )
+
+        else:
+            return ApexGroupNorm(
+                num_groups=num_groups_,
+                num_channels=num_channels,
+                eps=eps,
+                affine=True,
+            )
+    else:
+        return GroupNorm(
+            num_channels,
+            num_groups_,
+            min_channels_per_group,
+            eps,
+            False,
+            fused_act,
+            act,
+            amp_mode,
+        )
+
+
+class GroupNorm(torch.nn.Module):
+    """
+    A custom Group Normalization layer implementation.
+
+    Group Normalization (GN) divides the channels of the input tensor into groups and
+    normalizes the features within each group independently. It does not require the
+    batch size as in Batch Normalization, making itsuitable for batch sizes of any size
+    or even for batch-free scenarios.
+
+    Parameters
+    ----------
+    num_channels : int
+        Number of channels in the input tensor.
+    num_groups : int, optional
+        Desired number of groups to divide the input channels, by default 32.
+        This might be adjusted based on the `min_channels_per_group`.
+    min_channels_per_group : int, optional
+        Minimum channels required per group. This ensures that no group has fewer
+        channels than this number. By default 4.
+    eps : float, optional
+        A small number added to the variance to prevent division by zero, by default
+        1e-5.
+    use_apex_gn : bool, optional
+        A boolean flag indicating whether we want to use Apex GroupNorm for NHWC layout.
+        Need to set this as False on cpu. Defaults to False.
+    fused_act : bool, optional
+        Whether to fuse the activation function with GroupNorm. Defaults to False.
+    act : str, optional
+        The activation function to use when fusing activation with GroupNorm. Defaults to None.
+    amp_mode : bool, optional
+        A boolean flag indicating whether mixed-precision (AMP) training is enabled. Defaults to False.
+    Notes
+    -----
+    If `num_channels` is not divisible by `num_groups`, the actual number of groups
+    might be adjusted to satisfy the `min_channels_per_group` condition.
+    """
+
+    def __init__(
+        self,
+        num_channels: int,
+        num_groups: int = 32,
+        min_channels_per_group: int = 4,
+        eps: float = 1e-5,
+        use_apex_gn: bool = False,
+        fused_act: bool = False,
+        act: str = None,
+        amp_mode: bool = False,
+    ):
+        if fused_act and act is None:
+            raise ValueError("'act' must be specified when 'fused_act' is set to True.")
+
+        super().__init__()
+        self.num_groups = min(
+            num_groups,
+            (num_channels + min_channels_per_group - 1) // min_channels_per_group,
+        )
+        if num_channels % self.num_groups != 0:
+            raise ValueError(
+                "num_channels must be divisible by num_groups or min_channels_per_group"
+            )
+        self.eps = eps
+        if not use_apex_gn:
+            self.weight = torch.nn.Parameter(torch.ones(num_channels))
+            self.bias = torch.nn.Parameter(torch.zeros(num_channels))
+        if use_apex_gn and not _is_apex_available:
+            raise ValueError("'apex' is not installed, set `use_apex_gn=False`")
+        self.use_apex_gn = use_apex_gn
+        self.fused_act = fused_act
+        self.act = act.lower() if act else act
+        self.act_fn = None
+        self.amp_mode = amp_mode
+        if self.fused_act:
+            self.act_fn = self.get_activation_function()
+        if self.use_apex_gn:
+            raise ValueError(
+                "Deprecating Apex path in GroupNorm. Use the `group_norm_factory()` function instead for checkpoint compatibility"
+            )
+
+    def forward(self, x):
+        if not self.amp_mode:
+            if not self.use_apex_gn:
+                weight, bias = self.weight, self.bias
+                if weight.dtype != x.dtype:
+                    weight = self.weight.to(x.dtype)
+                if bias.dtype != x.dtype:
+                    bias = self.bias.to(x.dtype)
+        if self.use_apex_gn:
+            x = self.gn(x)
+        elif self.training:
+            # Use default torch implementation of GroupNorm for training
+            # This does not support channels last memory format
+            x = torch.nn.functional.group_norm(
+                x,
+                num_groups=self.num_groups,
+                weight=weight,
+                bias=bias,
+                eps=self.eps,
+            )
+            if self.fused_act:
+                x = self.act_fn(x)
+        else:
+            # Use custom GroupNorm implementation that supports channels last
+            # memory layout for inference
+            x = x.float()
+            x = einops.rearrange(x, "b (g c) h w -> b g c h w", g=self.num_groups)
+
+            mean = x.mean(dim=[2, 3, 4], keepdim=True)
+            var = x.var(dim=[2, 3, 4], keepdim=True)
+
+            x = (x - mean) * (var + self.eps).rsqrt()
+            x = einops.rearrange(x, "b g c h w -> b (g c) h w")
+
+            weight = einops.rearrange(weight, "c -> 1 c 1 1")
+            bias = einops.rearrange(bias, "c -> 1 c 1 1")
+            x = x * weight + bias
+
+            if self.fused_act:
+                x = self.act_fn(x)
+        return x
+
+    def get_activation_function(self):
+        """
+        Get activation function given string input
+        """
+        from torch.nn.functional import elu, gelu, leaky_relu, relu, sigmoid, silu, tanh
+
+        activation_map = {
+            "silu": silu,
+            "relu": relu,
+            "leaky_relu": leaky_relu,
+            "sigmoid": sigmoid,
+            "tanh": tanh,
+            "gelu": gelu,
+            "elu": elu,
+        }
+
+        act_fn = activation_map.get(self.act, None)
+        if act_fn is None:
+            raise ValueError(f"Unknown activation function: {self.act}")
+        return act_fn
+
+
+def NoCopyNCHW2NHWC(x: torch.Tensor):
+    """
+    Convert data that is in NCHW PyTorch format but channels last memory layout
+    to explicit NHWC PyTorch format by only changing the metadata
+    """
+    if not x.is_contiguous(memory_format=torch.channels_last):
+        warnings.warn(
+            f"Cannot do a zero-copy NCHW to NHWC. Performing explicit transpose...\nx.shape = {x.shape}, x.stride() = {x.stride()}"
+        )
+        x = x.to(memory_format=torch.channels_last)
+    if x.dim() != 4:
+        raise RuntimeError(
+            f"NoCopyNCHW2NHWC expects 4D tensors, got tensor with {x.dim()} dimensions"
+        )
+
+    return x.permute(0, 2, 3, 1)
+
+
+def NoCopyNHWC2NCHW(x: torch.Tensor):
+    """
+    Convert data that is in contiguous NHWC PyTorch format
+    to explicit channels last NCHW PyTorch format by only changing the metadata
+    """
+    if not x.is_contiguous(memory_format=torch.contiguous_format):
+        warnings.warn(
+            "Cannot do a zero-copy NHWC to NCHW. Performing explicit transpose..."
+        )
+        x = x.to(memory_format=torch.contiguous_format)
+    if x.dim() != 4:
+        raise RuntimeError(
+            f"NoCopyNHWC2NCHW expects 4D tensors, got tensor with {x.dim()} dimensions"
+        )
+
+    return x.permute(0, 3, 1, 2)
+
+
 class Conv2dHealpix(torch.nn.Module):
     """Same as Conv2D but works with healpix gridded data"""
 
@@ -178,6 +441,7 @@ class Conv2dHealpix(torch.nn.Module):
         init_mode="kaiming_normal",
         init_weight=1,
         init_bias=0,
+        padding_backend=PaddingBackends.cuda,
     ):
         assert not (up and down)
         super().__init__()
@@ -206,26 +470,50 @@ class Conv2dHealpix(torch.nn.Module):
         f = torch.as_tensor(resample_filter, dtype=torch.float32)
         f = f.ger(f).unsqueeze(0).unsqueeze(1) / f.sum().square()
         self.register_buffer("resample_filter", f if up or down else None)
+        self.padding_backend = padding_backend
 
     def preprocess(self, x, padding):
+        # Convert to B, T, X, C format at the outset
+        # no explicit transposes if data is in channels last memory format
+        x = NoCopyNCHW2NHWC(x)
         F = 12
-        B, C, T = x.shape[:3]
-        nx = x.shape[-1]
+        B, T, nx, C = x.shape
         nside = int(np.sqrt(nx / 12))
         assert nside * nside * F == nx
-        x = einops.rearrange(x, "b c t (f x y) -> (b c t) f x y", y=nside, x=nside, f=F)
+
+        if padding == 0:
+            x = einops.rearrange(
+                x,
+                "b t (f x y) c -> (b t f) x y c",
+                b=B,
+                t=T,
+                f=F,
+                x=nside,
+                y=nside,
+                c=C,
+            )
+            return NoCopyNHWC2NCHW(x)  # N C H W
+
         # healpix pad and earth2-grid have different convetions for the orientation of the grid
         # See explore/healpix_numbering.py for more information
         # TODO generalize earth2grid to support XY layouts with different orientations
-        torch.cuda.nvtx.range_push("healpix_pad")
-        x = healpix_pad(x, padding)
-        torch.cuda.nvtx.range_pop()
-        return einops.rearrange(x, "(b c t) f x y -> (b t f) c x y", b=B, t=T, f=F, c=C)
+        x = einops.rearrange(
+            x, "b t (f x y) c -> (b t) f x y c", y=nside, x=nside, f=F, c=C
+        )
+        x = x.permute(0, 1, 4, 2, 3)  # channels_last N F C H W
+        # TODO: Add torch.compile for indexing backend
+        with pad_backend(self.padding_backend):
+            x = healpix_pad(x, padding)
+        x = x.permute(0, 1, 3, 4, 2)  # N F H W C
+        # No transpose reshape
+        x = einops.rearrange(x, "(b t) f x y c -> (b t f) x y c", b=B, t=T, f=F, c=C)
+        # No copy convertion to channels last format for subsequent convolutions
+        return NoCopyNHWC2NCHW(x)  # N C H W
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: [b, c, t, x] shaped tensor
+            x: [b, c, t, x] shaped tensor, ideally channels last format
         """
         w = self.weight.to(x.dtype) if self.weight is not None else None
         b = self.bias.to(x.dtype) if self.bias is not None else None
@@ -241,7 +529,13 @@ class Conv2dHealpix(torch.nn.Module):
         B, C, T = x.shape[:3]
 
         def postprocess(x):
-            return einops.rearrange(x, "(b t f) c x y -> b c t (f x y)", b=B, t=T, f=F)
+            # No copy postprocess back to [b, c, t, x]
+            x = NoCopyNCHW2NHWC(x)
+            N, X, Y, C = x.shape
+            x = einops.rearrange(
+                x, "(b t f) x y c -> b t (f x y) c", b=B, t=T, f=F, x=X, y=Y, c=C
+            )
+            return NoCopyNHWC2NCHW(x)  # B C T X
 
         if self.up:
             x = torch.nn.functional.conv_transpose2d(
@@ -271,29 +565,6 @@ class Conv2dHealpix(torch.nn.Module):
             x = x.add_(b.reshape(1, -1, 1, 1))
 
         return postprocess(x)
-
-
-# ----------------------------------------------------------------------------
-# Group normalization.
-
-
-class GroupNorm(torch.nn.Module):
-    def __init__(self, num_channels, num_groups=32, min_channels_per_group=4, eps=1e-5):
-        super().__init__()
-        self.num_groups = min(num_groups, num_channels // min_channels_per_group)
-        self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(num_channels))
-        self.bias = torch.nn.Parameter(torch.zeros(num_channels))
-
-    def forward(self, x):
-        x = torch.nn.functional.group_norm(
-            x,
-            num_groups=self.num_groups,
-            weight=self.weight.to(x.dtype),
-            bias=self.bias.to(x.dtype),
-            eps=self.eps,
-        )
-        return x
 
 
 # ----------------------------------------------------------------------------
@@ -342,7 +613,11 @@ class Attention(torch.nn.Module):
         self, *, out_channels, eps, init_zero, init_attn, init, num_heads
     ) -> None:
         super().__init__()
-        self.norm2 = GroupNorm(num_channels=out_channels, eps=eps)
+        self.norm2 = group_norm_factory(
+            num_channels=out_channels,
+            eps=eps,
+            use_apex_gn=_is_apex_available,
+        )
         self.qkv = Conv2d(
             in_channels=out_channels,
             out_channels=out_channels * 3,
@@ -390,6 +665,7 @@ class UNetBlock(torch.nn.Module):
         init_attn=None,
         temporal_attention: bool = False,
         time_length: Optional[int] = None,
+        checkpoint: bool = True,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -409,7 +685,14 @@ class UNetBlock(torch.nn.Module):
         self.adaptive_scale = adaptive_scale
         self.temporal_attention = temporal_attention
         self.attention = attention
-        self.norm0 = GroupNorm(num_channels=in_channels, eps=eps)
+        self.checkpoint = checkpoint
+        self.norm0 = group_norm_factory(
+            num_channels=in_channels,
+            eps=eps,
+            use_apex_gn=_is_apex_available,
+            fused_act=True,
+            act="silu",
+        )
         self.conv0 = factory.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -424,7 +707,20 @@ class UNetBlock(torch.nn.Module):
             out_features=out_channels * (2 if adaptive_scale else 1),
             **init,
         )
-        self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
+        if adaptive_scale:
+            self.norm1 = group_norm_factory(
+                num_channels=out_channels,
+                eps=eps,
+                use_apex_gn=_is_apex_available,
+            )
+        else:
+            self.norm1 = group_norm_factory(
+                num_channels=out_channels,
+                eps=eps,
+                use_apex_gn=_is_apex_available,
+                fused_act=True,
+                act="silu",
+            )
         self.conv1 = factory.Conv2d(
             in_channels=out_channels, out_channels=out_channels, kernel=3, **init_zero
         )
@@ -469,24 +765,27 @@ class UNetBlock(torch.nn.Module):
 
     def forward(self, x, emb):
         # TODO add a flag controlling this
-        return torch.utils.checkpoint.checkpoint(
-            self.run_forward, x, emb, use_reentrant=False
-        )
+        if self.checkpoint:
+            return torch.utils.checkpoint.checkpoint(
+                self.run_forward, x, emb, use_reentrant=False
+            )
+        else:
+            return self.run_forward(x, emb)
 
     def run_forward(self, x, emb):
         orig = x
-        x = self.conv0(silu(self.norm0(x)))
+        x = self.conv0(self.norm0(x))
 
         params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
         if self.adaptive_scale:
             scale, shift = params.chunk(chunks=2, dim=1)
             x = silu(torch.addcmul(shift, self.norm1(x), scale + 1))
         else:
-            x = silu(self.norm1(x.add_(params)))
+            x = self.norm1(x.add_(params))
 
-        x = self.conv1(
-            torch.nn.functional.dropout(x, p=self.dropout, training=self.training)
-        )
+        x = torch.nn.functional.dropout(x, p=self.dropout, training=True)
+        x = self.conv1(x)
+
         x = x.add_(self.skip(orig) if self.skip is not None else orig)
         x = x * self.skip_scale
 
@@ -576,7 +875,11 @@ class TemporalAttention(torch.nn.Module):
         self, *, out_channels: int, seq_length: int, eps, num_heads: int
     ) -> None:
         super().__init__()
-        self.norm2 = GroupNorm(num_channels=out_channels, eps=eps)
+        self.norm2 = group_norm_factory(
+            num_channels=out_channels,
+            eps=eps,
+            use_apex_gn=_is_apex_available,
+        )
         self.qkv = torch.nn.Conv2d(
             in_channels=out_channels, out_channels=out_channels * 3, kernel_size=1
         )
@@ -647,6 +950,15 @@ class HealPixFactory(OriginalFactory):
 # "Score-Based Generative Modeling through Stochastic Differential
 # Equations". Equivalent to the original implementation by Song et al.,
 # available at https://github.com/yang-song/score_sde_pytorch
+# NOTE: Use of optimized GroupNorm needs a fix to this physicsnemo issue when
+# the number of channels is not a multiple of 8 (default num_groups):
+# https://github.com/NVIDIA/physicsnemo/issues/972
+
+
+@dataclasses.dataclass
+class Output:
+    out: torch.Tensor
+    logits: torch.Tensor | None = None
 
 
 class SongUNet(torch.nn.Module):
@@ -682,11 +994,14 @@ class SongUNet(torch.nn.Module):
         time_length: int = 1,
         add_spatial_embedding: bool = False,
         calendar_embed_channels: int = 0,  # embedding dimension for year fraction and second fraction
+        calendar_include_legacy_bug: bool = False,
         decoder_start_with_temporal_attention: bool = False,
         upsample_temporal_attention: bool = False,
         channels_per_head: int = -1,  # uses all heads if -1, otherwise uses this many per head
         patched: bool = False,
         pos_embed_channels: int = 128,
+        checkpoint_resolution_threshold=8,  # Resolutions above which to enable gradient checkpointing
+        enable_classifier: bool = False,  # Whether to include the classifier head
     ):
         super().__init__()
         assert embedding_type in ["fourier", "positional", "zero"]
@@ -702,6 +1017,7 @@ class SongUNet(torch.nn.Module):
         }[mixing_type]
         self.input_shape = (in_channels, time_length, domain.numel())
         self.label_dropout = label_dropout
+        self.checkpoint_resolution_threshold = checkpoint_resolution_threshold
         emb_channels = model_channels * channel_mult_emb
         noise_channels = model_channels * channel_mult_noise
         init = dict(init_mode="xavier_uniform")
@@ -728,7 +1044,9 @@ class SongUNet(torch.nn.Module):
         if calendar_embed_channels:
             # needs healpix
             self.embed_calendar = CalendarEmbedding(
-                torch.from_numpy(self.grid.lon).float(), calendar_embed_channels
+                torch.from_numpy(self.grid.lon).float(),
+                calendar_embed_channels,
+                include_legacy_bug=calendar_include_legacy_bug,
             )
             in_channels += self.embed_calendar.out_channels
         else:
@@ -802,7 +1120,11 @@ class SongUNet(torch.nn.Module):
                     )
             else:
                 self.enc[f"{res}x{res}_down"] = factory.UNetBlock(
-                    in_channels=cout, out_channels=cout, down=True, **block_kwargs
+                    in_channels=cout,
+                    out_channels=cout,
+                    down=True,
+                    checkpoint=(res >= self.checkpoint_resolution_threshold),
+                    **block_kwargs,
                 )
                 if encoder_type == "skip":
                     self.enc[f"{res}x{res}_aux_down"] = factory.Conv2d(
@@ -835,6 +1157,7 @@ class SongUNet(torch.nn.Module):
                     out_channels=cout,
                     attention=attn,
                     temporal_attention=res in self.temporal_attention_resolutions,
+                    checkpoint=(res >= self.checkpoint_resolution_threshold),
                     **block_kwargs,
                 )
         skips = [
@@ -852,10 +1175,14 @@ class SongUNet(torch.nn.Module):
                     out_channels=cout,
                     attention=True,
                     temporal_attention=decoder_start_with_temporal_attention,
+                    checkpoint=(res >= self.checkpoint_resolution_threshold),
                     **block_kwargs,
                 )
                 self.dec[f"{res}x{res}_in1"] = factory.UNetBlock(
-                    in_channels=cout, out_channels=cout, **block_kwargs
+                    in_channels=cout,
+                    out_channels=cout,
+                    checkpoint=(res >= self.checkpoint_resolution_threshold),
+                    **block_kwargs,
                 )
             else:
                 self.dec[f"{res}x{res}_up"] = factory.UNetBlock(
@@ -863,6 +1190,7 @@ class SongUNet(torch.nn.Module):
                     out_channels=cout,
                     up=True,
                     temporal_attention=upsample_temporal_attention,
+                    checkpoint=(res >= self.checkpoint_resolution_threshold),
                     **block_kwargs,
                 )
             for idx in range(num_blocks + 1):
@@ -878,6 +1206,7 @@ class SongUNet(torch.nn.Module):
                     out_channels=cout,
                     attention=attn,
                     temporal_attention=temporal_attn,
+                    checkpoint=(res >= self.checkpoint_resolution_threshold),
                     **block_kwargs,
                 )
             if decoder_type == "skip" or level == 0:
@@ -889,12 +1218,41 @@ class SongUNet(torch.nn.Module):
                         up=True,
                         resample_filter=resample_filter,
                     )
-                self.dec[f"{res}x{res}_aux_norm"] = GroupNorm(
-                    num_channels=cout, eps=1e-6
+                self.dec[f"{res}x{res}_aux_norm"] = group_norm_factory(
+                    num_channels=cout,
+                    eps=1e-6,
+                    use_apex_gn=_is_apex_available,
                 )
                 self.dec[f"{res}x{res}_aux_conv"] = factory.Conv2d(
                     in_channels=cout, out_channels=out_channels, kernel=3, **init_zero
                 )
+
+        # Classifier
+        lowest_res = img_resolution >> len(channel_mult)
+        factory = factory_cls((lowest_res, lowest_res))
+
+        if enable_classifier:
+            self.classifier_dropout = torch.nn.Dropout(p=0.5)  # 50% dropout
+            self.low_res_classifier = torch.nn.Sequential(
+                factory.Conv2d(
+                    in_channels=model_channels * channel_mult[-1],
+                    out_channels=32,
+                    kernel=3,
+                    resample_filter=resample_filter,
+                ),
+                torch.nn.ReLU(),
+                group_norm_factory(num_channels=32, num_groups=8),
+                self.classifier_dropout,
+                factory.Conv2d(
+                    in_channels=32,
+                    out_channels=1,
+                    kernel=1,
+                    resample_filter=resample_filter,
+                ),
+            )
+        else:
+            self.classifier_dropout = None
+            self.low_res_classifier = None
 
     @property
     def grid(self):
@@ -916,7 +1274,7 @@ class SongUNet(torch.nn.Module):
         day_of_year=None,
         second_of_day=None,
         position_embedding=None,  # local positional embedding with shape [B, C_embd, N, N], matching the shape of x except for the channel dimension
-    ):
+    ) -> Output:
         torch.cuda.nvtx.range_push("SongUNet:forward")
         # if patched, concat local position_embedding to input
         if self.patched and self.add_spatial_embedding:
@@ -962,8 +1320,14 @@ class SongUNet(torch.nn.Module):
             else:
                 sig = inspect.signature(block.forward)
                 nparams = len(sig.parameters)
-                x = block(x, emb) if nparams == 2 else block(x)
+                x = block(x, emb) if nparams >= 2 else block(x)
                 skips.append(x)
+
+        # Classifier.
+        if self.low_res_classifier is not None:
+            classifier_out = self.low_res_classifier(x)
+        else:
+            classifier_out = None
 
         # Decoder.
         aux = None
@@ -982,7 +1346,7 @@ class SongUNet(torch.nn.Module):
                     x = torch.cat([x, skip], dim=1)
                 x = block(x, emb)
         torch.cuda.nvtx.range_pop()
-        return aux
+        return Output(aux, classifier_out)
 
     def init_pos_embed_sinusoid(self):
         with torch.no_grad():
@@ -1067,7 +1431,7 @@ class EDMPrecond(torch.nn.Module):
         condition=None,
         force_fp32=False,
         **model_kwargs,
-    ):
+    ) -> Output:
         x = x.to(torch.float32)
         sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
         class_labels = (
@@ -1097,15 +1461,30 @@ class EDMPrecond(torch.nn.Module):
             condition = torch.nan_to_num(condition, nan=0.0)
             arg = torch.cat([c_in * x, condition], dim=1)
 
-        F_x = self.model(
-            arg.to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs
+        out = self.model(
+            arg.to(dtype),
+            c_noise.flatten(),
+            class_labels=class_labels,
+            **model_kwargs,
         )
         # assert F_x.dtype == dtype
-        D_x = c_skip * x + c_out * F_x.to(torch.float32)
-        return D_x
+        D_x = c_skip * x + c_out * out.out.to(torch.float32)
+        return dataclasses.replace(out, out=D_x)
 
     def round_sigma(self, sigma):
         return torch.as_tensor(sigma)
+
+
+class EDMPrecondLegacy(EDMPrecond):
+    """An implementation of EDMPrecond with a backwards compatible .forward
+
+    Returns:
+        torch.Tensor
+    """
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        out = super().forward(*args, **kwargs)
+        return out.out
 
 
 def SongUNetHPX64(
@@ -1113,6 +1492,7 @@ def SongUNetHPX64(
     out_channels: int,
     level=6,
     calendar_embed_channels: int = 0,
+    enable_classifier: bool = False,
     **kwargs,
 ) -> SongUNet:
     """Base Unet for HPX64 resolution"""
@@ -1137,6 +1517,7 @@ def SongUNetHPX64(
         out_channels=out_channels,
         domain=domain,
         calendar_embed_channels=calendar_embed_channels,
+        enable_classifier=enable_classifier,
         **config,
     )
 

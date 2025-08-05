@@ -69,3 +69,8 @@ DATA_ROOT = os.getenv("DATA_ROOT", os.path.join(PROJECT_ROOT, "datasets"))
 CHECKPOINT_ROOT = os.getenv(
     "CHECKPOINT_ROOT", os.path.join(PROJECT_ROOT, "training-runs")
 )
+
+# IBTrACS data path
+IBTRACS_DATA_PATH = os.getenv(
+    "IBTRACS_DATA_PATH", os.path.join(CACHE_DIR, "ibtracs.nc")
+)

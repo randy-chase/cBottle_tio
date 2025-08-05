@@ -12,7 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import sys
+import subprocess
 
-from .inference import SuperResolutionModel
 
-__all__ = ["SuperResolutionModel"]
+def test_example(tmp_path):
+    subprocess.check_call(
+        [sys.executable, "examples/custom_training.py", tmp_path.as_posix()]
+    )

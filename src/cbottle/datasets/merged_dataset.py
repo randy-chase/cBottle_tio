@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from zarr.core.sync import sync
-import xarray as xr
 import torch
 import math
 import pandas as pd
@@ -21,16 +20,22 @@ import cftime
 import numpy as np
 import asyncio
 from typing import Callable
+import cbottle.datetime
 
 
-async def _sel_time(loaders, time):
-    arrays = await asyncio.gather(*[loader.sel_time(time) for loader in loaders])
+class _MergedLoader:
+    def __init__(self, loaders) -> None:
+        self._loaders = loaders
 
-    data = {}
-    for d in arrays:
-        data.update(d)
-
-    return data
+    async def sel_time(self, time) -> dict[str, np.ndarray]:
+        # Standardize time to np.ndarray of np.datetime64
+        arrays = await asyncio.gather(
+            *[loader.sel_time(time) for loader in self._loaders]
+        )
+        data = {}
+        for d in arrays:
+            data.update(d)
+        return data
 
 
 def _split(x, rank, world_size, drop_extra=True):
@@ -97,10 +102,9 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
                 f"{time_length} with step {frame_step} (needs {frames_per_window} frames)"
             )
 
-        self._loaders = time_loaders
+        self._loader = _MergedLoader(time_loaders)
         self.rank = rank
         self.world_size = world_size
-        self.times = times
         self.set_times(times)  # Shard times across ranks
 
         if len(self._times) < chunk_size:
@@ -125,13 +129,19 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
 
         self.overlap = frames_per_window - 1
 
+    @property
+    def times(self) -> pd.DatetimeIndex:
+        return pd.DatetimeIndex(self._times)
+
     def set_times(self, times):
-        self._times = _split(times, self.rank, self.world_size)
+        self._times = _split(
+            cbottle.datetime.as_numpy(times), self.rank, self.world_size
+        )
 
     def _load_chunk(self, chunk: int):
-        return sync(_sel_time(self._loaders, self._times_for_chunk(chunk)))
+        return sync(self._loader.sel_time(self._times_for_chunk(chunk)))
 
-    def _times_for_chunk(self, chunk: int) -> pd.DatetimeIndex | xr.CFTimeIndex:
+    def _times_for_chunk(self, chunk: int) -> np.ndarray:
         return self._times[
             chunk * self.chunk_size : (chunk + 1) * self.chunk_size + self.overlap
         ]
@@ -197,9 +207,10 @@ class TimeMergedDataset(torch.utils.data.IterableDataset):
                 for idx in frame_idxs:
                     time = times_for_chunk[idx]
                     arr_i = {k: v[idx] for k, v in arr.items()}
-                    timestamp = pd.Timestamp(*cftime.to_tuple(time))
+                    timestamp = pd.Timestamp(time)
+                    cftimestamp = cbottle.datetime.as_cftime(timestamp)
                     frames.append(arr_i)
-                    timestamps.append(timestamp)
+                    timestamps.append(cftimestamp)
 
                 window_tensor = self.transform(timestamps, frames)
 
@@ -230,7 +241,7 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         self.transform = transform
         self.time_length = time_length
         self.frame_step = frame_step
-        self._loaders = time_loaders
+        self._loader = _MergedLoader(time_loaders)
 
         # can only use idxs that can create a full window
         frames_per_window = (self.time_length - 1) * self.frame_step + 1
@@ -255,7 +266,7 @@ class TimeMergedMapStyle(torch.utils.data.Dataset):
         )
 
         window_times = self.times[list(frame_idxs)]
-        window_data = sync(_sel_time(self._loaders, window_times))
+        window_data = sync(self._loader.sel_time(window_times))
 
         frames = []
         timestamps = []

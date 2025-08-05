@@ -61,12 +61,10 @@ def log_prob(
     def f(t, y):
         y = torch.tensor(y).to(image.device)
         x = y[batch_size:].view(image.shape)
-
         if mask is not None:
             x = torch.where(mask, x, 0.0)
 
         x.requires_grad_(True)
-
         dx = (x - D(x, t)) / t
 
         if mask is not None:
@@ -94,7 +92,6 @@ def log_prob(
 
     y0 = torch.cat([v, x0]).cpu().numpy()
     solution = solve_ivp(f, t_span=[sigma_min, sigma_max], y0=y0, rtol=rtol)
-    # solution.y (n, nt)
     xT = solution.y[batch_size:, -1]
     divf_int = torch.from_numpy(solution.y[:batch_size, -1] * numerical_factor).to(
         image.device

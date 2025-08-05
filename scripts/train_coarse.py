@@ -41,9 +41,12 @@ from cbottle.dataclass_parser import parse_args
 from cbottle.datasets import dataset_2d
 from cbottle.datasets.base import BatchInfo, TimeUnit
 from cbottle.config.training.masking import MaskingConfig, base_masking_config
+from cbottle.metrics import BinnedAverage
 from cbottle.training.video.frame_masker import FrameMasker
 from cbottle.datasets import samplers
 from cbottle.datasets.dataset_3d import (
+    VARIABLE_CONFIGS,
+    VariableConfig,
     MAX_CLASSES,
     get_batch_info,
     get_dataset,
@@ -62,6 +65,7 @@ import cbottle.models.networks
 @dataclasses.dataclass(frozen=True)
 class SongUnetConfig:
     model_channels: int = 128
+    include_legacy_calendar_bug: bool = False
 
 
 @dataclasses.dataclass
@@ -89,6 +93,9 @@ class TrainingLoop(loop.TrainingLoopBase):
     dataloader_prefetch_factor: int = 200
     label_dropout: float = 0.0
     monthly_sst_input: bool = False
+    ibtracs_input: bool = False  # Whether to include tropical cyclone labels
+    ibtracs_loss_weight: float = 0.1  # Weight for tropical cyclone classification loss
+    variables: str = "default"
     icon_chunk_size: int = 8
     era5_chunk_size: int = 48
 
@@ -106,9 +113,62 @@ class TrainingLoop(loop.TrainingLoopBase):
         default_factory=base_masking_config
     )
 
+    @property
+    def variable_config(self) -> VariableConfig:
+        return VARIABLE_CONFIGS[self.variables]
+
+    def setup_sigma_bins(self):
+        # Loss by sigma metric
+        self._sigma_metric_bin_edges = torch.tensor([0, 0.1, 1, 10, 100, 1000])
+        self._test_sigma_metric = BinnedAverage(self._sigma_metric_bin_edges).to(
+            self.device
+        )
+        self._train_sigma_metric = BinnedAverage(self._sigma_metric_bin_edges).to(
+            self.device
+        )
+        self._train_classifier_sigma_metric = BinnedAverage(
+            self._sigma_metric_bin_edges
+        ).to(self.device)
+        self._test_classifier_sigma_metric = BinnedAverage(
+            self._sigma_metric_bin_edges
+        ).to(self.device)
+
+    def setup(self):
+        super().setup()
+        self.setup_sigma_bins()
+
+    def finish_sigma_by_loss_metrics(self):
+        values = {}
+        loss_avg = values["train"] = self._train_sigma_metric.compute()
+        values["test"] = self._test_sigma_metric.compute()
+        classifier_loss_avg = {}
+        classifier_loss_avg["train"] = self._train_classifier_sigma_metric.compute()
+        classifier_loss_avg["test"] = self._test_classifier_sigma_metric.compute()
+
+        self._train_sigma_metric.reset()
+        self._test_sigma_metric.reset()
+        self._train_classifier_sigma_metric.reset()
+        self._test_classifier_sigma_metric.reset()
+
+        for split in values:
+            for i in range(loss_avg.size(0)):
+                bin = self._sigma_metric_bin_edges[i].item()
+                # Denoising loss
+                name = f"loss_by_sigma{bin:.2e}/{split}"
+                loss_bin = values[split][i].item()
+                training_stats.report(name, loss_bin)
+                # Classifier loss
+                classifier_name = f"classifier_loss_by_sigma{bin:.2e}/{split}"
+                classifier_loss_bin = classifier_loss_avg[split][i].item()
+                training_stats.report(classifier_name, classifier_loss_bin)
+
     @functools.cached_property
     def batch_info(self) -> BatchInfo:
-        return get_batch_info(time_step=self.time_step, time_unit=TimeUnit.HOUR)
+        return get_batch_info(
+            config=self.variable_config,
+            time_step=self.time_step,
+            time_unit=TimeUnit.HOUR,
+        )
 
     @property
     def out_channels(self):
@@ -165,6 +225,8 @@ class TrainingLoop(loop.TrainingLoopBase):
             time_step=self.time_step,
             time_length=self.time_length,
             frame_masker=self._get_frame_masker(train),
+            ibtracs_input=self.ibtracs_input,
+            variable_config=VARIABLE_CONFIGS[self.variables],
         )
 
     # unused settings only for backwards compatibility
@@ -223,11 +285,45 @@ class TrainingLoop(loop.TrainingLoopBase):
 
         return D
 
+    def _curry_net_discard_classifier(self, net, batch):
+        def D(x, t):
+            out = net(
+                x,
+                torch.as_tensor(t, device=x.device),
+                batch["labels"],
+                condition=batch["condition"],
+                day_of_year=batch["day_of_year"],
+                second_of_day=batch["second_of_day"],
+            )
+            return out.out
+
+        return D
+
     def train_step(self, *, target, timestamp=None, **batch):
-        return self.loss_fn(
-            net=self._curry_net(self.ddp, batch),
-            images=target,
+        loss: cbottle.loss.Output = self.loss_fn(
+            self._curry_net(self.ddp, batch),
+            target,
+            classifier_labels=batch.get("classifier_labels"),
         )
+        training_stats.report("Loss/denoising", loss.denoising)
+        self._train_sigma_metric.update(loss.sigma, loss.denoising)
+        if loss.classification is not None:
+            training_stats.report("Loss/classification", loss.classification)
+            self._train_classifier_sigma_metric.update(loss.sigma, loss.classification)
+        return loss.total
+
+    def test_step(self, *, target, timestamp=None, **batch):
+        loss: cbottle.loss.Output = self.loss_fn(
+            self._curry_net(self.ddp, batch),
+            target,
+            classifier_labels=batch.get("classifier_labels"),
+        )
+        training_stats.report("Loss/test_denoising", loss.denoising)
+        self._test_sigma_metric.update(loss.sigma, loss.denoising)
+        if loss.classification is not None:
+            training_stats.report("Loss/test_classification", loss.classification)
+            self._test_classifier_sigma_metric.update(loss.sigma, loss.classification)
+        return loss.total
 
     @classmethod
     def loads(cls, s):
@@ -271,6 +367,7 @@ class TrainingLoop(loop.TrainingLoopBase):
                 model_channels=self.network.model_channels,
                 time_length=self.time_length,
                 label_dropout=self.label_dropout,
+                calendar_include_legacy_bug=self.network.include_legacy_calendar_bug,
             )
         else:
             return cbottle.config.models.ModelConfigV1(
@@ -278,6 +375,8 @@ class TrainingLoop(loop.TrainingLoopBase):
                 out_channels=out_channels,
                 condition_channels=condition_channels,
                 model_channels=self.network.model_channels,
+                calendar_include_legacy_bug=self.network.include_legacy_calendar_bug,
+                enable_classifier=self.ibtracs_input,
             )
 
     def get_optimizer(self, parameters):
@@ -294,6 +393,7 @@ class TrainingLoop(loop.TrainingLoopBase):
                 sigma_max=self.sigma_max,
                 sigma_min=self.sigma_min,
                 distribution=self.noise_distribution,
+                classifier_weight=self.ibtracs_loss_weight,
             )
 
     def sample(self, batch):
@@ -311,7 +411,8 @@ class TrainingLoop(loop.TrainingLoopBase):
         target = batch["target"]
         mask = ~torch.isnan(target)
         log_prob, _ = cbottle.likelihood.log_prob(
-            self._curry_net(net, batch),
+            # TODO replace with denoiser classifier?
+            self._curry_net_discard_classifier(net, batch),
             target,
             mask,
             sigma_min=self.sigma_min,
@@ -328,6 +429,13 @@ class TrainingLoop(loop.TrainingLoopBase):
             training_stats.report(
                 f"log_prob_{dataset_name}", log_prob_per_dim[labels_one_hot[:, i] != 0]
             )
+
+    @staticmethod
+    def _reorder_classifier_output(x):
+        x = torch.as_tensor(x)
+        return earth2grid.healpix.reorder(
+            x, earth2grid.healpix.HEALPIX_PAD_XY, earth2grid.healpix.PixelOrder.RING
+        )
 
     def validate(self, net=None):
         # show plots for a single batch
@@ -390,7 +498,6 @@ class TrainingLoop(loop.TrainingLoopBase):
                 >= self.valid_min_samples
             ):
                 break
-
             batch = self._stage_dict_batch(batch)
             images = batch["target"]
 
@@ -433,14 +540,16 @@ class TrainingLoop(loop.TrainingLoopBase):
                             f"seasonal_cycle/{field}/{season}/truth",
                             ring_images[j, c, t] * b.scales[c] + b.center[c],
                         )
-            # loss function
             with torch.no_grad():
-                loss = self.train_step(**batch)
-            training_stats.report("Loss/test_loss", loss)
+                # Classifier validation
+                self.validate_classifier(images, net, batch)
+                loss = self.test_step(**batch)
+                training_stats.report("Loss/test_loss", loss)
 
             self._report_log_likelihood(net, batch)
 
         averages = finish()
+        self.finish_sigma_by_loss_metrics()
 
         if d is None:
             raise RuntimeError(
@@ -483,6 +592,39 @@ class TrainingLoop(loop.TrainingLoopBase):
                 visualize(averages[key])
                 self.writer.add_figure(key, plt.gcf(), global_step=self.cur_nimg)
 
+    def validate_classifier(self, images, net, batch):
+        if self.ibtracs_input:
+            sigmas = torch.tensor(
+                [self.sigma_min, self.sigma_max / 4],
+                device=images.device,
+            )
+            for sigma in sigmas:
+                noise = torch.randn_like(images) * sigma
+                noisy_images = images + noise
+
+                out = net(
+                    x=noisy_images,
+                    sigma=sigma.expand(images.shape[0], 1),
+                    condition=batch.get("condition"),
+                    day_of_year=batch.get("day_of_year"),
+                    second_of_day=batch.get("second_of_day"),
+                )
+
+                if out.logits is not None:
+                    tc_probs = torch.sigmoid(out.logits)
+                    visualize(self._reorder_classifier_output(tc_probs[0, 0, 0]))
+                    self.writer.add_figure(
+                        f"sample/tc_probability/classifier/sigma_{sigma:.3f}",
+                        plt.gcf(),
+                        global_step=self.cur_nimg,
+                    )
+                    visualize(self._reorder_classifier_output(noisy_images[0, 0, 0]))
+                    self.writer.add_figure(
+                        f"sample/noisy_image/sigma_{sigma:.3f}",
+                        plt.gcf(),
+                        global_step=self.cur_nimg,
+                    )
+
 
 @dataclasses.dataclass
 class CLI:
@@ -505,6 +647,8 @@ class CLI:
             batch_gpu=2,
             lr_rampup_img=10_000,
             with_era5=False,
+            ibtracs_input=False,
+            ibtracs_loss_weight=0.1,
         )
     )
 

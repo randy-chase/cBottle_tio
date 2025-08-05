@@ -35,7 +35,6 @@ import torch
 import zipfile
 import json
 from typing import Literal
-import numpy as np
 import cbottle.config.models
 import cbottle.models
 import cbottle.datasets.base
@@ -79,8 +78,9 @@ class Checkpoint:
         if metadata["version"] != current_version:
             raise ValueError(f"Unsupported checkpoint version: {metadata['version']}")
 
+        model_config = self.read_model_config()
         if net is None:
-            net = cbottle.models.get_model(self.read_model_config())
+            net = cbottle.models.get_model(model_config)
 
         with self._zip.open("net_state.pth", "r") as f:
             net.load_state_dict(
@@ -112,12 +112,23 @@ class Checkpoint:
     def read_batch_info(self) -> cbottle.datasets.base.BatchInfo:
         with self._zip.open("batch_info.json", "r") as f:
             d = json.loads(f.read())
-            d["scales"] = np.asarray(d["scales"]) if d["scales"] is not None else None
-            d["center"] = np.asarray(d["center"]) if d["center"] is not None else None
+            scales = d.pop("scales", None)
+            center = d.pop("center", None)
             if d["time_unit"] == "":  # backwards compatibility
-                d["time_unit"] = "h"
-            d["time_unit"] = cbottle.datasets.base.TimeUnit[d["time_unit"]]
-            return cbottle.datasets.base.BatchInfo(**d)
+                time_unit = cbottle.datasets.base.TimeUnit.HOUR
+            elif d["time_unit"] == "MINUTE":
+                time_unit = cbottle.datasets.base.TimeUnit.MINUTE
+            elif d["time_unit"] == "HOUR":
+                time_unit = cbottle.datasets.base.TimeUnit.HOUR
+            else:
+                time_unit_dict = {v.value: v for v in cbottle.datasets.base.TimeUnit}
+                time_unit = time_unit_dict[d["time_unit"]]
+            return cbottle.datasets.base.BatchInfo(
+                time_unit=time_unit,
+                scales=scales,
+                center=center,
+                channels=d["channels"],
+            )
 
     def write_model_config(self, model_config: cbottle.config.models.ModelConfigV1):
         self._zip.writestr("model.json", model_config.dumps())

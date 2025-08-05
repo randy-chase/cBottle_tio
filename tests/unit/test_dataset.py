@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from cbottle.datasets import dataset_3d
-from cbottle.datasets.dataset_3d import INDEX
+from cbottle.datasets.dataset_3d import _get_index
 
-nchannel = len(INDEX)
+nchannel = len(_get_index())
 
 
 def test_get_std():

@@ -15,7 +15,6 @@
 """Generate random images using the techniques described in the paper
 "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
-import functools
 import numpy as np
 import torch
 
@@ -23,7 +22,7 @@ import torch
 def edm_sampler_steps(
     num_steps=18,
     sigma_min=0.002,
-    sigma_max=80,
+    sigma_max: float = 80.0,
     rho=7,
     S_churn=0,
     S_min=0,
@@ -112,9 +111,9 @@ def edm_sampler_from_sigma(
     net,
     latents,
     randn_like=torch.randn_like,
-    num_steps=18,
-    sigma_min=0.002,
-    sigma_max=80,
+    num_steps: int = 18,
+    sigma_min: float = 0.002,
+    sigma_max: float = 80.0,
     rho=7,
     S_churn=0,
     S_min=0,
@@ -201,11 +200,3 @@ class StackedRandomGenerator:
                 for gen in self.generators
             ]
         )
-
-
-def curry_denoiser(net, *args, **kwargs):
-    D = functools.partial(net, *args, **kwargs)
-    D.sigma_min = net.sigma_min
-    D.sigma_max = net.sigma_max
-    D.round_sigma = net.round_sigma
-    return D

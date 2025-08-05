@@ -32,7 +32,8 @@ def test_train_uncond(tmpdir):
         valid_min_samples=1,
         dataloader_num_workers=2,
         hpx_level=6,
-        with_era5=False,
+        with_era5=True,
+        ibtracs_input=True,
     )
 
     try:

@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 import cartopy.crs
 import cbottle.loss
 import numpy as np
-import functools
 
 
 def create_regular_grid_in_projection(projection, nx, ny):
@@ -131,7 +130,10 @@ def call_regression(net, class_labels, condition):
 
 
 def curry_denoiser(net, *args, **kwargs):
-    D = functools.partial(net, *args, **kwargs)
+    def D(x, t):
+        out = net(x, t, *args, **kwargs)  # Ignore classifier output
+        return out.out
+
     D.sigma_min = net.sigma_min
     D.sigma_max = net.sigma_max
     D.round_sigma = net.round_sigma
@@ -158,6 +160,8 @@ def sample_from_condition(
         batch = batch.copy()
 
         condition = batch.pop("condition")
+        # pop this if it exists
+        batch.pop("classifier_labels", None)
         # TODO this logic is wrong
         batch.pop("target")
         labels = batch.pop("labels")

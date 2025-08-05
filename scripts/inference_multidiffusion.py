@@ -19,12 +19,12 @@ import earth2grid
 import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
-from cbottle import checkpointing, patchify, visualizations
+from cbottle import visualizations
 from cbottle.datasets import samplers
 from cbottle.datasets.dataset_2d import HealpixDatasetV5, NetCDFWrapperV1
-from cbottle.diffusion_samplers import edm_sampler
 from cbottle.netcdf_writer import NetCDFConfig, NetCDFWriter
 from earth2grid import healpix
+from cbottle.inference import SuperResolutionModel, Coords
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import argparse
@@ -87,12 +87,15 @@ def inference(arg_list=None, customized_dataset=None):
     )
     parser.add_argument("--sigma-max", type=int, default=800, help="Noise sigma max")
     parser.add_argument(
+        "--save-data", action="store_true", help="Save target data without inference"
+    )
+    parser.add_argument(
         "--super-resolution-box",
         type=int,
         nargs=4,
         default=None,
-        metavar=("lat_south", "lon_west", "lat_north", "lon_east"),
-        help="Bounding box (lat_south lon_west lat_north lon_east) where super-resolution will be applied. "
+        metavar=("lon_west", "lon_east", "lat_south", "lat_north"),
+        help="Bounding box (lon_west lon_east lat_south lat_north) where super-resolution will be applied. "
         "Regions outside the box remain coarse.",
     )
     args = parser.parse_args(arg_list)
@@ -101,11 +104,6 @@ def inference(arg_list=None, customized_dataset=None):
     output_path = args.output_path
     plot_sample = args.plot_sample
     hpx_level = args.level
-    hpx_lr_level = args.level_lr
-    patch_size = args.patch_size
-    overlap_size = args.overlap_size
-    num_steps = args.num_steps
-    sigma_max = args.sigma_max
     min_samples = args.min_samples
     box = tuple(args.super_resolution_box) if args.super_resolution_box else None
 
@@ -132,12 +130,15 @@ def inference(arg_list=None, customized_dataset=None):
         tasks = None
     elif input_path:
         ds = xr.open_dataset(input_path)
-        test_dataset = NetCDFWrapperV1(ds, hpx_level=hpx_level, healpixpad_order=False)
-        tasks = None
+        test_dataset = NetCDFWrapperV1(
+            ds, hpx_level=hpx_level, normalize=False, healpixpad_order=False
+        )
+        tasks = np.r_[WORLD_RANK : len(test_dataset) : WORLD_SIZE]
     else:
         test_dataset = HealpixDatasetV5(
             path=config.RAW_DATA_URL,
             land_path=config.LAND_DATA_URL_10,
+            normalize=False,
             train=False,
             yield_index=True,
             healpixpad_order=False,
@@ -160,101 +161,54 @@ def inference(arg_list=None, customized_dataset=None):
         output_path, nc_config, test_dataset.batch_info.channels, rank=WORLD_RANK
     )
 
-    in_channels = len(test_dataset.fields_out)
+    model = SuperResolutionModel.from_pretrained(
+        state_path,
+        hpx_lr_level=args.level_lr,
+        patch_size=args.patch_size,
+        overlap_size=args.overlap_size,
+        num_steps=args.num_steps,
+        sigma_max=args.sigma_max,
+        device=device,
+    )
 
-    with checkpointing.Checkpoint(state_path) as checkpoint:
-        net = checkpoint.read_model()
+    high_res_level = model.high_res_grid.level
+    low_res_level = model.low_res_grid.level
 
-    net.eval().requires_grad_(False).cuda()
+    coords = Coords(test_dataset.batch_info, model.low_res_grid)
 
-    torch.cuda.set_device(LOCAL_RANK)
-    net.cuda(LOCAL_RANK)
-
-    # setup grids
-    high_res_grid = healpix.Grid(level=hpx_level, pixel_order=healpix.PixelOrder.NEST)
-    low_res_grid = healpix.Grid(level=hpx_lr_level, pixel_order=healpix.PixelOrder.NEST)
-    lat = torch.linspace(-90, 90, 128)[:, None]
-    lon = torch.linspace(0, 360, 128)[None, :]
-    regrid_to_latlon = low_res_grid.get_bilinear_regridder_to(lat, lon).cuda()
-    regrid = earth2grid.get_regridder(low_res_grid, high_res_grid)
-    regrid.cuda().float()
-
-    inbox_patch_index = None
-    if box is not None:
-        inbox_patch_index = patchify.patch_index_from_bounding_box(
-            hpx_level, box, patch_size, overlap_size, device
-        )
-        print(
-            f"Performing super-resolution within the minimal region covering (lat_south, lon_west, lat_north, lon_east): {box} with {len(inbox_patch_index)} patches. "
-        )
-    else:
-        print("Performing super-resolution over the entire globe")
-
-    for batch in tqdm.tqdm(loader):
+    for batch in tqdm.tqdm(loader, disable=WORLD_RANK != 0):
         target = batch["target"]
         target = target[0, :, 0]
-        # normalize inputs
         with torch.no_grad():
-            # coarsen the target map as condition if icon_v5 is used
+            # coarsen target if input is hpx64 icon
             if not input_path:
                 lr = target
-                for _ in range(high_res_grid.level - low_res_grid.level):
+                for _ in range(high_res_level - low_res_level):
                     npix = lr.size(-1)
                     shape = lr.shape[:-1]
                     lr = lr.view(shape + (npix // 4, 4)).mean(-1)
-                inp = lr.cuda()
+                inp = lr.cuda()[None, :, None]
+            # load condition if input path is given
             else:
                 inp = batch["condition"]
-                inp = inp[0, :, 0]
+                inp = inp
                 inp = inp.cuda(non_blocking=True)
-            # get global low res
-            global_lr = regrid_to_latlon(inp.double())[None,].cuda()
-            lr = regrid(inp)
-        latents = torch.randn_like(lr)
-        latents = latents.reshape((in_channels, -1))
-        lr = lr.reshape((in_channels, -1))
-        target = target.reshape((in_channels, -1))
-        latents = latents[None,].to(device)
-        lr = lr[None,].to(device)
-        target = target[None,].to(device)
-        with torch.no_grad():
-            # scope with global_lr and other inputs present
-            def denoiser(x, t):
-                return (
-                    patchify.apply_on_patches(
-                        net,
-                        patch_size=patch_size,
-                        overlap_size=overlap_size,
-                        x_hat=x,
-                        x_lr=lr,
-                        t_hat=t,
-                        class_labels=None,
-                        batch_size=128,
-                        global_lr=global_lr,
-                        inbox_patch_index=inbox_patch_index,
-                        device=device,
-                    )
-                    .to(torch.float64)
-                    .cuda()
-                )
 
-            denoiser.sigma_max = net.sigma_max
-            denoiser.sigma_min = net.sigma_min
-            denoiser.round_sigma = net.round_sigma
-            pred = edm_sampler(
-                denoiser,
-                latents,
-                num_steps=num_steps,
-                sigma_max=sigma_max,
-            )
-        pred = pred.cpu() * test_dataset._scale + test_dataset._mean
-        lr = lr.cpu() * test_dataset._scale + test_dataset._mean
-        target = target.cpu() * test_dataset._scale + test_dataset._mean
+        if args.save_data:
+            pred = target[None, :, None]
+        else:
+            pred, _ = model(inp, coords=coords, extents=box)
+
+        target = target[None, :, None]
 
         def prepare(x):
-            ring_order = high_res_grid.reorder(earth2grid.healpix.PixelOrder.RING, x)
+            ring_order = healpix.reorder(
+                x,
+                earth2grid.healpix.PixelOrder.NEST,
+                earth2grid.healpix.PixelOrder.RING,
+            )
             return {
-                test_dataset.batch_info.channels[c]: ring_order[:, c, None].cpu()
+                test_dataset.batch_info.channels[c]: ring_order[:, c].cpu()
                 for c in range(x.shape[1])
             }
 
