@@ -37,6 +37,8 @@ from .diffusion_samplers import (
     StackedRandomGenerator,
 )
 from .datasets import base
+from earth2grid.healpix import PaddingBackends
+
 from .datasets.dataset_2d import HealpixDatasetV5, LABELS
 from cbottle.config import environment
 
@@ -103,13 +105,31 @@ class CBottle3d:
         sigma_thresholds: tuple[float, ...] = (),
         **kwargs,
     ) -> "CBottle3d":
-        net = MixtureOfExpertsDenoiser.from_pretrained(path, sigma_thresholds)
+        use_apex_groupnorm = kwargs.pop("use_apex_groupnorm", None)
+        padding_backend = kwargs.pop("padding_backend", None)
+        in_place_operations = kwargs.pop("in_place_operations", True)
+        net = MixtureOfExpertsDenoiser.from_pretrained(
+            path,
+            sigma_thresholds,
+            use_apex_groupnorm=use_apex_groupnorm,
+            padding_backend=padding_backend,
+            in_place_operations=in_place_operations,
+        )
 
         separate_classifier = None
         if separate_classifier_path is not None:
             logging.info(f"Opening additional classifier at {separate_classifier_path}")
             with checkpointing.Checkpoint(separate_classifier_path) as c:
-                separate_classifier = c.read_model().cuda().eval()
+                separate_classifier = (
+                    c.read_model(
+                        map_location=None,
+                        use_apex_groupnorm=use_apex_groupnorm,
+                        padding_backend=padding_backend,
+                        in_place_operations=in_place_operations,
+                    )
+                    .cuda()
+                    .eval()
+                )
 
         return cls(net, separate_classifier=separate_classifier, **kwargs)
 
@@ -393,6 +413,7 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
+        post_process: bool = True,
     ):
         """
 
@@ -519,7 +540,9 @@ class CBottle3d:
                         self.sigma_max
                     ),  # Convert to int for type compatibility
                 )
-            return self._post_process(out), self.coords
+            if post_process:
+                out = self._post_process(out)
+            return out, self.coords
 
     def get_guidance_pixels(self, lons, lats) -> torch.Tensor:
         return self.classifier_grid.ang2pix(
@@ -808,7 +831,13 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
 
     @classmethod
     def from_pretrained(
-        cls, path: str | list[str], sigma_thresholds: tuple[float, ...]
+        cls,
+        path: str | list[str],
+        sigma_thresholds: tuple[float, ...],
+        *,
+        use_apex_groupnorm: bool | None = None,
+        padding_backend=None,
+        in_place_operations: bool = True,
     ) -> "MixtureOfExpertsDenoiser":
         match path:
             case str():
@@ -822,7 +851,16 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         for path in paths:
             logging.info(f"Opening {path}")
             with checkpointing.Checkpoint(path) as c:
-                model = c.read_model().cuda().eval()
+                model = (
+                    c.read_model(
+                        map_location=None,
+                        use_apex_groupnorm=use_apex_groupnorm,
+                        padding_backend=padding_backend,
+                        in_place_operations=in_place_operations,
+                    )
+                    .cuda()
+                    .eval()
+                )
                 experts.append(model)
                 batch_info = c.read_batch_info()
         return cls(experts, sigma_thresholds=sigma_thresholds, batch_info=batch_info)
@@ -879,5 +917,8 @@ def load(model: str, root="") -> CBottle3d:
             paths,
             sigma_thresholds=(100.0, 10.0),
             separate_classifier_path=classifier_path,
+            use_apex_groupnorm=False,
+            padding_backend=PaddingBackends.indexing,
+            in_place_operations=False,
         )
     raise ValueError(model)

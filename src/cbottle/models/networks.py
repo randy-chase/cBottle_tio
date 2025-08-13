@@ -196,7 +196,7 @@ def group_norm_factory(
     num_groups: int = 32,
     min_channels_per_group: int = 4,
     eps: float = 1e-5,
-    use_apex_gn: bool = False,
+    use_apex_gn: bool | None = None,
     fused_act: bool = False,
     act: str = None,
     amp_mode: bool = False,
@@ -216,9 +216,11 @@ def group_norm_factory(
             "num_channels must be divisible by num_groups or min_channels_per_group"
         )
     act = act.lower() if act else act
-    if use_apex_gn and not _is_apex_available:
+    # Determine effective Apex usage: if None, follow availability
+    effective_use_apex = _is_apex_available if use_apex_gn is None else use_apex_gn
+    if effective_use_apex and not _is_apex_available:
         raise ValueError("'apex' is not installed, set `use_apex_gn=False`")
-    if use_apex_gn:
+    if effective_use_apex:
         if act:
             return ApexGroupNorm(
                 num_groups=num_groups_,
@@ -442,6 +444,7 @@ class Conv2dHealpix(torch.nn.Module):
         init_weight=1,
         init_bias=0,
         padding_backend=PaddingBackends.cuda,
+        in_place_operations: bool = True,
     ):
         assert not (up and down)
         super().__init__()
@@ -471,6 +474,7 @@ class Conv2dHealpix(torch.nn.Module):
         f = f.ger(f).unsqueeze(0).unsqueeze(1) / f.sum().square()
         self.register_buffer("resample_filter", f if up or down else None)
         self.padding_backend = padding_backend
+        self.in_place_operations = in_place_operations
 
     def preprocess(self, x, padding):
         # Convert to B, T, X, C format at the outset
@@ -562,7 +566,10 @@ class Conv2dHealpix(torch.nn.Module):
             )
 
         if b is not None:
-            x = x.add_(b.reshape(1, -1, 1, 1))
+            if self.in_place_operations:
+                x = x.add_(b.reshape(1, -1, 1, 1))
+            else:
+                x = x + b.reshape(1, -1, 1, 1)
 
         return postprocess(x)
 
@@ -610,13 +617,21 @@ class AttentionOp(torch.autograd.Function):
 # ADM architectures.
 class Attention(torch.nn.Module):
     def __init__(
-        self, *, out_channels, eps, init_zero, init_attn, init, num_heads
+        self,
+        *,
+        out_channels,
+        eps,
+        init_zero,
+        init_attn,
+        init,
+        num_heads,
+        use_apex_groupnorm: bool | None = None,
     ) -> None:
         super().__init__()
         self.norm2 = group_norm_factory(
             num_channels=out_channels,
             eps=eps,
-            use_apex_gn=_is_apex_available,
+            use_apex_gn=use_apex_groupnorm,
         )
         self.qkv = Conv2d(
             in_channels=out_channels,
@@ -666,6 +681,10 @@ class UNetBlock(torch.nn.Module):
         temporal_attention: bool = False,
         time_length: Optional[int] = None,
         checkpoint: bool = True,
+        use_apex_groupnorm: bool | None = None,
+        is_healpix_factory: bool = False,
+        padding_backend: PaddingBackends | None = None,
+        in_place_operations: bool = True,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -686,13 +705,21 @@ class UNetBlock(torch.nn.Module):
         self.temporal_attention = temporal_attention
         self.attention = attention
         self.checkpoint = checkpoint
+        self._is_healpix_factory = is_healpix_factory
+        self._padding_backend = padding_backend
+        self._in_place_operations = in_place_operations
         self.norm0 = group_norm_factory(
             num_channels=in_channels,
             eps=eps,
-            use_apex_gn=_is_apex_available,
+            use_apex_gn=use_apex_groupnorm,
             fused_act=True,
             act="silu",
         )
+        conv_kwargs_pb = {}
+        if self._is_healpix_factory:
+            if self._padding_backend is not None:
+                conv_kwargs_pb.update(padding_backend=self._padding_backend)
+            conv_kwargs_pb.update(in_place_operations=self._in_place_operations)
         self.conv0 = factory.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -701,6 +728,7 @@ class UNetBlock(torch.nn.Module):
             down=down,
             resample_filter=resample_filter,
             **init,
+            **conv_kwargs_pb,
         )
         self.affine = Linear(
             in_features=emb_channels,
@@ -711,18 +739,22 @@ class UNetBlock(torch.nn.Module):
             self.norm1 = group_norm_factory(
                 num_channels=out_channels,
                 eps=eps,
-                use_apex_gn=_is_apex_available,
+                use_apex_gn=use_apex_groupnorm,
             )
         else:
             self.norm1 = group_norm_factory(
                 num_channels=out_channels,
                 eps=eps,
-                use_apex_gn=_is_apex_available,
+                use_apex_gn=use_apex_groupnorm,
                 fused_act=True,
                 act="silu",
             )
         self.conv1 = factory.Conv2d(
-            in_channels=out_channels, out_channels=out_channels, kernel=3, **init_zero
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel=3,
+            **init_zero,
+            **conv_kwargs_pb,
         )
 
         self.skip = None
@@ -736,6 +768,7 @@ class UNetBlock(torch.nn.Module):
                 down=down,
                 resample_filter=resample_filter,
                 **init,
+                **conv_kwargs_pb,
             )
 
         if self.attention:
@@ -746,6 +779,7 @@ class UNetBlock(torch.nn.Module):
                 init_attn=init_attn,
                 init=init,
                 num_heads=self.num_heads,
+                use_apex_groupnorm=use_apex_groupnorm,
             )
         else:
             self.attn = None
@@ -761,6 +795,7 @@ class UNetBlock(torch.nn.Module):
                 seq_length=time_length,
                 eps=1e-5,
                 num_heads=self.num_heads,
+                use_apex_groupnorm=use_apex_groupnorm,
             )
 
     def forward(self, x, emb):
@@ -852,7 +887,17 @@ class ApplySpace(torch.nn.Module):
 
 
 class SpatialAttention(torch.nn.Module):
-    def __init__(self, *, out_channels, eps, init_zero, init_attn, init, num_heads):
+    def __init__(
+        self,
+        *,
+        out_channels,
+        eps,
+        init_zero,
+        init_attn,
+        init,
+        num_heads,
+        use_apex_groupnorm: bool | None = None,
+    ):
         super().__init__()
         self.attention = Attention(
             out_channels=out_channels,
@@ -861,6 +906,7 @@ class SpatialAttention(torch.nn.Module):
             init_attn=init_attn,
             init=init,
             num_heads=num_heads,
+            use_apex_groupnorm=use_apex_groupnorm,
         )
 
     def forward(self, x):
@@ -872,13 +918,19 @@ class SpatialAttention(torch.nn.Module):
 
 class TemporalAttention(torch.nn.Module):
     def __init__(
-        self, *, out_channels: int, seq_length: int, eps, num_heads: int
+        self,
+        *,
+        out_channels: int,
+        seq_length: int,
+        eps,
+        num_heads: int,
+        use_apex_groupnorm: bool | None = None,
     ) -> None:
         super().__init__()
         self.norm2 = group_norm_factory(
             num_channels=out_channels,
             eps=eps,
-            use_apex_gn=_is_apex_available,
+            use_apex_gn=use_apex_groupnorm,
         )
         self.qkv = torch.nn.Conv2d(
             in_channels=out_channels, out_channels=out_channels * 3, kernel_size=1
@@ -1002,6 +1054,9 @@ class SongUNet(torch.nn.Module):
         pos_embed_channels: int = 128,
         checkpoint_resolution_threshold=8,  # Resolutions above which to enable gradient checkpointing
         enable_classifier: bool = False,  # Whether to include the classifier head
+        use_apex_groupnorm: bool | None = None,
+        padding_backend: PaddingBackends | None = None,
+        in_place_operations: bool = True,
     ):
         super().__init__()
         assert embedding_type in ["fourier", "positional", "zero"]
@@ -1035,6 +1090,10 @@ class SongUNet(torch.nn.Module):
             init=init,
             init_zero=init_zero,
             init_attn=init_attn,
+            use_apex_groupnorm=use_apex_groupnorm,
+            is_healpix_factory=(factory_cls is HealPixFactory),
+            padding_backend=padding_backend,
+            in_place_operations=in_place_operations,
         )
         if channels_per_head == -1:
             block_kwargs.update(num_heads=1)
@@ -1103,6 +1162,11 @@ class SongUNet(torch.nn.Module):
         self.enc = torch.nn.ModuleDict()
         cout = in_channels
         caux = in_channels
+        conv2d_extra = {}
+        if factory_cls is HealPixFactory:
+            if padding_backend is not None:
+                conv2d_extra["padding_backend"] = padding_backend
+            conv2d_extra["in_place_operations"] = in_place_operations
         for level, mult in enumerate(channel_mult):
             res = img_resolution >> level
             img_size = (res, res)
@@ -1112,11 +1176,19 @@ class SongUNet(torch.nn.Module):
                 cout = model_channels
                 if not self.patched:
                     self.enc[f"{res}x{res}_conv_embed"] = factory.Conv2d(
-                        in_channels=cin, out_channels=cout, kernel=3, **init
+                        in_channels=cin,
+                        out_channels=cout,
+                        kernel=3,
+                        **conv2d_extra,
+                        **init,
                     )
                 else:
                     self.enc[f"{res}x{res}_conv"] = factory.Conv2d(
-                        in_channels=cin, out_channels=cout, kernel=3, **init
+                        in_channels=cin,
+                        out_channels=cout,
+                        kernel=3,
+                        **conv2d_extra,
+                        **init,
                     )
             else:
                 self.enc[f"{res}x{res}_down"] = factory.UNetBlock(
@@ -1133,9 +1205,14 @@ class SongUNet(torch.nn.Module):
                         kernel=0,
                         down=True,
                         resample_filter=resample_filter,
+                        **conv2d_extra,
                     )
                     self.enc[f"{res}x{res}_aux_skip"] = factory.Conv2d(
-                        in_channels=caux, out_channels=cout, kernel=1, **init
+                        in_channels=caux,
+                        out_channels=cout,
+                        kernel=1,
+                        **conv2d_extra,
+                        **init,
                     )
                 if encoder_type == "residual":
                     self.enc[f"{res}x{res}_aux_residual"] = factory.Conv2d(
@@ -1145,6 +1222,7 @@ class SongUNet(torch.nn.Module):
                         down=True,
                         resample_filter=resample_filter,
                         fused_resample=True,
+                        **conv2d_extra,
                         **init,
                     )
                     caux = cout
@@ -1217,14 +1295,19 @@ class SongUNet(torch.nn.Module):
                         kernel=0,
                         up=True,
                         resample_filter=resample_filter,
+                        **conv2d_extra,
                     )
                 self.dec[f"{res}x{res}_aux_norm"] = group_norm_factory(
                     num_channels=cout,
                     eps=1e-6,
-                    use_apex_gn=_is_apex_available,
+                    use_apex_gn=use_apex_groupnorm,
                 )
                 self.dec[f"{res}x{res}_aux_conv"] = factory.Conv2d(
-                    in_channels=cout, out_channels=out_channels, kernel=3, **init_zero
+                    in_channels=cout,
+                    out_channels=out_channels,
+                    kernel=3,
+                    **conv2d_extra,
+                    **init_zero,
                 )
 
         # Classifier
@@ -1239,15 +1322,19 @@ class SongUNet(torch.nn.Module):
                     out_channels=32,
                     kernel=3,
                     resample_filter=resample_filter,
+                    **conv2d_extra,
                 ),
                 torch.nn.ReLU(),
-                group_norm_factory(num_channels=32, num_groups=8),
+                group_norm_factory(
+                    num_channels=32, num_groups=8, use_apex_gn=use_apex_groupnorm
+                ),
                 self.classifier_dropout,
                 factory.Conv2d(
                     in_channels=32,
                     out_channels=1,
                     kernel=1,
                     resample_filter=resample_filter,
+                    **conv2d_extra,
                 ),
             )
         else:

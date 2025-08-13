@@ -18,7 +18,13 @@ from cbottle.models import networks
 from cbottle.config.models import ModelConfigV1
 
 
-def get_model(config: ModelConfigV1) -> torch.nn.Module:
+def get_model(
+    config: ModelConfigV1,
+    *,
+    use_apex_groupnorm: bool | None = None,
+    padding_backend=None,
+    in_place_operations: bool = True,
+) -> torch.nn.Module:
     if config.architecture == "unet_hpx64":
         precond_cls = networks.EDMPrecond
         if config.time_length > 1:
@@ -31,6 +37,9 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
                 time_length=config.time_length,
                 label_dropout=config.label_dropout,
                 calendar_include_legacy_bug=config.calendar_include_legacy_bug,
+                use_apex_groupnorm=use_apex_groupnorm,
+                padding_backend=padding_backend,
+                in_place_operations=in_place_operations,
             )
         else:
             architecture = networks.SongUNetHPX64(
@@ -41,6 +50,9 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
                 model_channels=config.model_channels,
                 calendar_include_legacy_bug=config.calendar_include_legacy_bug,
                 enable_classifier=config.enable_classifier,
+                use_apex_groupnorm=use_apex_groupnorm,
+                padding_backend=padding_backend,
+                in_place_operations=in_place_operations,
             )
 
     elif config.architecture == "unet_hpx1024_patch":
@@ -55,6 +67,9 @@ def get_model(config: ModelConfigV1) -> torch.nn.Module:
             pos_embed_channels=config.position_embed_channels,
             label_dim=config.label_dim,
             level=config.level,
+            use_apex_groupnorm=use_apex_groupnorm,
+            padding_backend=padding_backend,
+            in_place_operations=in_place_operations,
         )
     else:
         raise NotImplementedError(config.architecture)
