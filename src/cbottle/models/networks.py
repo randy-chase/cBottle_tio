@@ -42,6 +42,12 @@ from cbottle.models.embedding import (
     FourierEmbedding,
     PositionalEmbedding,
 )
+if torch.cuda.is_available():
+    try:
+        apex_gn_module = importlib.import_module("apex.contrib.group_norm")
+        ApexGroupNorm = getattr(apex_gn_module, "GroupNorm")
+    except ImportError:
+        ApexGroupNorm = None
 
 # ----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
@@ -205,8 +211,6 @@ def group_norm_factory(
             "num_channels must be divisible by num_groups or min_channels_per_group"
         )
     act = act.lower() if act else act
-    if use_apex_gn and not _is_apex_available:
-        raise ValueError("'apex' is not installed, set `use_apex_gn=False`")
     if use_apex_gn:
         if act:
             return ApexGroupNorm(
@@ -301,8 +305,6 @@ class GroupNorm(torch.nn.Module):
         if not use_apex_gn:
             self.weight = torch.nn.Parameter(torch.ones(num_channels))
             self.bias = torch.nn.Parameter(torch.zeros(num_channels))
-        if use_apex_gn and not _is_apex_available:
-            raise ValueError("'apex' is not installed, set `use_apex_gn=False`")
         self.use_apex_gn = use_apex_gn
         self.fused_act = fused_act
         self.act = act.lower() if act else act
