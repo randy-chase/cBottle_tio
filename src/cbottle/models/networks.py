@@ -43,17 +43,6 @@ from cbottle.models.embedding import (
     PositionalEmbedding,
 )
 
-# Import apex GroupNorm if installed only
-_is_apex_available = False
-if torch.cuda.is_available():
-    try:
-        apex_gn_module = importlib.import_module("apex.contrib.group_norm")
-        ApexGroupNorm = getattr(apex_gn_module, "GroupNorm")
-        _is_apex_available = True
-    except ImportError:
-        pass
-
-
 # ----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
 
@@ -973,7 +962,13 @@ class SpatialFactory(OriginalFactory):
 
 
 class HealPixFactory(OriginalFactory):
-    def __init__(self, img_size: tuple[int, int], use_apex_groupnorm: bool = False, padding_backend: PaddingBackends | None = None, in_place_operations: bool = True):
+    def __init__(
+        self,
+        img_size: tuple[int, int],
+        use_apex_groupnorm: bool = False,
+        padding_backend: PaddingBackends | None = None,
+        in_place_operations: bool = True,
+    ):
         super().__init__(img_size, use_apex_groupnorm)
         self.padding_backend = padding_backend
         self.in_place_operations = in_place_operations
@@ -1150,13 +1145,19 @@ class SongUNet(torch.nn.Module):
         self.enc = torch.nn.ModuleDict()
         cout = in_channels
         caux = in_channels
+
         # Helper function to create factory with appropriate parameters
         def create_factory(img_size):
             if factory_cls is HealPixFactory:
-                return factory_cls(img_size, use_apex_groupnorm=use_apex_groupnorm, padding_backend=padding_backend, in_place_operations=in_place_operations)
+                return factory_cls(
+                    img_size,
+                    use_apex_groupnorm=use_apex_groupnorm,
+                    padding_backend=padding_backend,
+                    in_place_operations=in_place_operations,
+                )
             else:
                 return factory_cls(img_size, use_apex_groupnorm=use_apex_groupnorm)
-        
+
         for level, mult in enumerate(channel_mult):
             res = img_resolution >> level
             img_size = (res, res)

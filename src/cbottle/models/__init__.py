@@ -12,11 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import torch
 
 from cbottle.models import networks
 from cbottle.config.models import ModelConfigV1
 from earth2grid.healpix import PaddingBackends
+
+# Import apex GroupNorm if installed only
+_is_apex_available = False
+if torch.cuda.is_available():
+    try:
+        apex_gn_module = importlib.import_module("apex.contrib.group_norm")
+        ApexGroupNorm = getattr(apex_gn_module, "GroupNorm")
+        _is_apex_available = True
+    except ImportError:
+        pass
 
 
 def get_model(
@@ -29,7 +40,7 @@ def get_model(
         padding_backend = PaddingBackends.indexing
         in_place_operations = False
     else:
-        use_apex_groupnorm = True
+        use_apex_groupnorm = True if _is_apex_available else False
         padding_backend = PaddingBackends.cuda
         in_place_operations = True
 
