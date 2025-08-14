@@ -29,7 +29,6 @@ if torch.cuda.is_available():
     except ImportError:
         pass
 
-
 def get_model(
     config: ModelConfigV1,
     *,
