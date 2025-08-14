@@ -196,7 +196,7 @@ def group_norm_factory(
     num_groups: int = 32,
     min_channels_per_group: int = 4,
     eps: float = 1e-5,
-    use_apex_gn: bool | None = None,
+    use_apex_gn: bool = False,
     fused_act: bool = False,
     act: str = None,
     amp_mode: bool = False,
@@ -216,11 +216,9 @@ def group_norm_factory(
             "num_channels must be divisible by num_groups or min_channels_per_group"
         )
     act = act.lower() if act else act
-    # Determine effective Apex usage: if None, follow availability
-    effective_use_apex = _is_apex_available if use_apex_gn is None else use_apex_gn
-    if effective_use_apex and not _is_apex_available:
+    if use_apex_gn and not _is_apex_available:
         raise ValueError("'apex' is not installed, set `use_apex_gn=False`")
-    if effective_use_apex:
+    if use_apex_gn:
         if act:
             return ApexGroupNorm(
                 num_groups=num_groups_,
@@ -625,7 +623,7 @@ class Attention(torch.nn.Module):
         init_attn,
         init,
         num_heads,
-        use_apex_groupnorm: bool | None = None,
+        use_apex_groupnorm: bool = False,
     ) -> None:
         super().__init__()
         self.norm2 = group_norm_factory(
@@ -681,10 +679,7 @@ class UNetBlock(torch.nn.Module):
         temporal_attention: bool = False,
         time_length: Optional[int] = None,
         checkpoint: bool = True,
-        use_apex_groupnorm: bool | None = None,
-        is_healpix_factory: bool = False,
-        padding_backend: PaddingBackends | None = None,
-        in_place_operations: bool = True,
+        use_apex_groupnorm: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -705,21 +700,14 @@ class UNetBlock(torch.nn.Module):
         self.temporal_attention = temporal_attention
         self.attention = attention
         self.checkpoint = checkpoint
-        self._is_healpix_factory = is_healpix_factory
-        self._padding_backend = padding_backend
-        self._in_place_operations = in_place_operations
+
         self.norm0 = group_norm_factory(
             num_channels=in_channels,
             eps=eps,
-            use_apex_gn=use_apex_groupnorm,
+            use_apex_gn=factory.use_apex_groupnorm,
             fused_act=True,
             act="silu",
         )
-        conv_kwargs_pb = {}
-        if self._is_healpix_factory:
-            if self._padding_backend is not None:
-                conv_kwargs_pb.update(padding_backend=self._padding_backend)
-            conv_kwargs_pb.update(in_place_operations=self._in_place_operations)
         self.conv0 = factory.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -728,7 +716,6 @@ class UNetBlock(torch.nn.Module):
             down=down,
             resample_filter=resample_filter,
             **init,
-            **conv_kwargs_pb,
         )
         self.affine = Linear(
             in_features=emb_channels,
@@ -739,13 +726,13 @@ class UNetBlock(torch.nn.Module):
             self.norm1 = group_norm_factory(
                 num_channels=out_channels,
                 eps=eps,
-                use_apex_gn=use_apex_groupnorm,
+                use_apex_gn=factory.use_apex_groupnorm,
             )
         else:
             self.norm1 = group_norm_factory(
                 num_channels=out_channels,
                 eps=eps,
-                use_apex_gn=use_apex_groupnorm,
+                use_apex_gn=factory.use_apex_groupnorm,
                 fused_act=True,
                 act="silu",
             )
@@ -754,7 +741,6 @@ class UNetBlock(torch.nn.Module):
             out_channels=out_channels,
             kernel=3,
             **init_zero,
-            **conv_kwargs_pb,
         )
 
         self.skip = None
@@ -768,7 +754,6 @@ class UNetBlock(torch.nn.Module):
                 down=down,
                 resample_filter=resample_filter,
                 **init,
-                **conv_kwargs_pb,
             )
 
         if self.attention:
@@ -779,7 +764,7 @@ class UNetBlock(torch.nn.Module):
                 init_attn=init_attn,
                 init=init,
                 num_heads=self.num_heads,
-                use_apex_groupnorm=use_apex_groupnorm,
+                use_apex_groupnorm=factory.use_apex_groupnorm,
             )
         else:
             self.attn = None
@@ -795,7 +780,7 @@ class UNetBlock(torch.nn.Module):
                 seq_length=time_length,
                 eps=1e-5,
                 num_heads=self.num_heads,
-                use_apex_groupnorm=use_apex_groupnorm,
+                use_apex_groupnorm=factory.use_apex_groupnorm,
             )
 
     def forward(self, x, emb):
@@ -835,8 +820,9 @@ class UNetBlock(torch.nn.Module):
 
 
 class OriginalFactory:
-    def __init__(self, img_size: tuple[int, int]):
+    def __init__(self, img_size: tuple[int, int], use_apex_groupnorm: bool = False):
         self.img_size = img_size
+        self.use_apex_groupnorm = use_apex_groupnorm
 
     def Conv2d(self, **kwargs):
         return Conv2d(**kwargs)
@@ -896,7 +882,7 @@ class SpatialAttention(torch.nn.Module):
         init_attn,
         init,
         num_heads,
-        use_apex_groupnorm: bool | None = None,
+        use_apex_groupnorm: bool = False,
     ):
         super().__init__()
         self.attention = Attention(
@@ -924,7 +910,7 @@ class TemporalAttention(torch.nn.Module):
         seq_length: int,
         eps,
         num_heads: int,
-        use_apex_groupnorm: bool | None = None,
+        use_apex_groupnorm: bool = False,
     ) -> None:
         super().__init__()
         self.norm2 = group_norm_factory(
@@ -969,8 +955,8 @@ class TemporalAttention(torch.nn.Module):
 
 
 class SpatialFactory(OriginalFactory):
-    def __init__(self, img_size: tuple[int, int]):
-        self.img_size = img_size
+    def __init__(self, img_size: tuple[int, int], use_apex_groupnorm: bool = False):
+        super().__init__(img_size, use_apex_groupnorm)
 
     def Conv2d(self, up=False, down=False, **kwargs):
         if down:
@@ -987,10 +973,15 @@ class SpatialFactory(OriginalFactory):
 
 
 class HealPixFactory(OriginalFactory):
-    def __init__(self, img_size: tuple[int, int]):
-        self.img_size = img_size
+    def __init__(self, img_size: tuple[int, int], use_apex_groupnorm: bool = False, padding_backend: PaddingBackends | None = None, in_place_operations: bool = True):
+        super().__init__(img_size, use_apex_groupnorm)
+        self.padding_backend = padding_backend
+        self.in_place_operations = in_place_operations
 
     def Conv2d(self, *args, **kwargs):
+        # Add HealPix-specific arguments
+        kwargs["padding_backend"] = self.padding_backend
+        kwargs["in_place_operations"] = self.in_place_operations
         return Conv2dHealpix(*args, **kwargs)
 
     def Attention(self, **kwargs):
@@ -1054,7 +1045,7 @@ class SongUNet(torch.nn.Module):
         pos_embed_channels: int = 128,
         checkpoint_resolution_threshold=8,  # Resolutions above which to enable gradient checkpointing
         enable_classifier: bool = False,  # Whether to include the classifier head
-        use_apex_groupnorm: bool | None = None,
+        use_apex_groupnorm: bool = False,
         padding_backend: PaddingBackends | None = None,
         in_place_operations: bool = True,
     ):
@@ -1091,9 +1082,6 @@ class SongUNet(torch.nn.Module):
             init_zero=init_zero,
             init_attn=init_attn,
             use_apex_groupnorm=use_apex_groupnorm,
-            is_healpix_factory=(factory_cls is HealPixFactory),
-            padding_backend=padding_backend,
-            in_place_operations=in_place_operations,
         )
         if channels_per_head == -1:
             block_kwargs.update(num_heads=1)
@@ -1162,15 +1150,17 @@ class SongUNet(torch.nn.Module):
         self.enc = torch.nn.ModuleDict()
         cout = in_channels
         caux = in_channels
-        conv2d_extra = {}
-        if factory_cls is HealPixFactory:
-            if padding_backend is not None:
-                conv2d_extra["padding_backend"] = padding_backend
-            conv2d_extra["in_place_operations"] = in_place_operations
+        # Helper function to create factory with appropriate parameters
+        def create_factory(img_size):
+            if factory_cls is HealPixFactory:
+                return factory_cls(img_size, use_apex_groupnorm=use_apex_groupnorm, padding_backend=padding_backend, in_place_operations=in_place_operations)
+            else:
+                return factory_cls(img_size, use_apex_groupnorm=use_apex_groupnorm)
+        
         for level, mult in enumerate(channel_mult):
             res = img_resolution >> level
             img_size = (res, res)
-            factory = factory_cls(img_size)
+            factory = create_factory(img_size)
             if level == 0:
                 cin = cout
                 cout = model_channels
@@ -1179,7 +1169,6 @@ class SongUNet(torch.nn.Module):
                         in_channels=cin,
                         out_channels=cout,
                         kernel=3,
-                        **conv2d_extra,
                         **init,
                     )
                 else:
@@ -1187,7 +1176,6 @@ class SongUNet(torch.nn.Module):
                         in_channels=cin,
                         out_channels=cout,
                         kernel=3,
-                        **conv2d_extra,
                         **init,
                     )
             else:
@@ -1205,13 +1193,11 @@ class SongUNet(torch.nn.Module):
                         kernel=0,
                         down=True,
                         resample_filter=resample_filter,
-                        **conv2d_extra,
                     )
                     self.enc[f"{res}x{res}_aux_skip"] = factory.Conv2d(
                         in_channels=caux,
                         out_channels=cout,
                         kernel=1,
-                        **conv2d_extra,
                         **init,
                     )
                 if encoder_type == "residual":
@@ -1222,7 +1208,6 @@ class SongUNet(torch.nn.Module):
                         down=True,
                         resample_filter=resample_filter,
                         fused_resample=True,
-                        **conv2d_extra,
                         **init,
                     )
                     caux = cout
@@ -1246,7 +1231,7 @@ class SongUNet(torch.nn.Module):
         self.dec = torch.nn.ModuleDict()
         for level, mult in reversed(list(enumerate(channel_mult))):
             res = img_resolution >> level
-            factory = factory_cls((res, res))
+            factory = create_factory((res, res))
             if level == len(channel_mult) - 1:
                 self.dec[f"{res}x{res}_in0"] = factory.UNetBlock(
                     in_channels=cout,
@@ -1295,7 +1280,6 @@ class SongUNet(torch.nn.Module):
                         kernel=0,
                         up=True,
                         resample_filter=resample_filter,
-                        **conv2d_extra,
                     )
                 self.dec[f"{res}x{res}_aux_norm"] = group_norm_factory(
                     num_channels=cout,
@@ -1306,13 +1290,12 @@ class SongUNet(torch.nn.Module):
                     in_channels=cout,
                     out_channels=out_channels,
                     kernel=3,
-                    **conv2d_extra,
                     **init_zero,
                 )
 
         # Classifier
         lowest_res = img_resolution >> len(channel_mult)
-        factory = factory_cls((lowest_res, lowest_res))
+        factory = create_factory((lowest_res, lowest_res))
 
         if enable_classifier:
             self.classifier_dropout = torch.nn.Dropout(p=0.5)  # 50% dropout
@@ -1322,7 +1305,6 @@ class SongUNet(torch.nn.Module):
                     out_channels=32,
                     kernel=3,
                     resample_filter=resample_filter,
-                    **conv2d_extra,
                 ),
                 torch.nn.ReLU(),
                 group_norm_factory(
@@ -1334,7 +1316,6 @@ class SongUNet(torch.nn.Module):
                     out_channels=1,
                     kernel=1,
                     resample_filter=resample_filter,
-                    **conv2d_extra,
                 ),
             )
         else:

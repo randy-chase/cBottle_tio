@@ -37,7 +37,6 @@ from .diffusion_samplers import (
     StackedRandomGenerator,
 )
 from .datasets import base
-from earth2grid.healpix import PaddingBackends
 
 from .datasets.dataset_2d import HealpixDatasetV5, LABELS
 from cbottle.config import environment
@@ -105,15 +104,13 @@ class CBottle3d:
         sigma_thresholds: tuple[float, ...] = (),
         **kwargs,
     ) -> "CBottle3d":
-        use_apex_groupnorm = kwargs.pop("use_apex_groupnorm", None)
-        padding_backend = kwargs.pop("padding_backend", None)
-        in_place_operations = kwargs.pop("in_place_operations", True)
+        allow_second_order_derivatives = kwargs.pop(
+            "allow_second_order_derivatives", True
+        )
         net = MixtureOfExpertsDenoiser.from_pretrained(
             path,
             sigma_thresholds,
-            use_apex_groupnorm=use_apex_groupnorm,
-            padding_backend=padding_backend,
-            in_place_operations=in_place_operations,
+            allow_second_order_derivatives=allow_second_order_derivatives,
         )
 
         separate_classifier = None
@@ -123,9 +120,7 @@ class CBottle3d:
                 separate_classifier = (
                     c.read_model(
                         map_location=None,
-                        use_apex_groupnorm=use_apex_groupnorm,
-                        padding_backend=padding_backend,
-                        in_place_operations=in_place_operations,
+                        allow_second_order_derivatives=allow_second_order_derivatives,
                     )
                     .cuda()
                     .eval()
@@ -835,9 +830,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         path: str | list[str],
         sigma_thresholds: tuple[float, ...],
         *,
-        use_apex_groupnorm: bool | None = None,
-        padding_backend=None,
-        in_place_operations: bool = True,
+        allow_second_order_derivatives: bool = True,
     ) -> "MixtureOfExpertsDenoiser":
         match path:
             case str():
@@ -854,9 +847,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
                 model = (
                     c.read_model(
                         map_location=None,
-                        use_apex_groupnorm=use_apex_groupnorm,
-                        padding_backend=padding_backend,
-                        in_place_operations=in_place_operations,
+                        allow_second_order_derivatives=allow_second_order_derivatives,
                     )
                     .cuda()
                     .eval()
@@ -917,8 +908,6 @@ def load(model: str, root="") -> CBottle3d:
             paths,
             sigma_thresholds=(100.0, 10.0),
             separate_classifier_path=classifier_path,
-            use_apex_groupnorm=False,
-            padding_backend=PaddingBackends.indexing,
-            in_place_operations=False,
+            allow_second_order_derivatives=True,
         )
     raise ValueError(model)

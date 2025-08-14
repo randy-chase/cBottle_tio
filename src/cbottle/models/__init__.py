@@ -16,15 +16,23 @@ import torch
 
 from cbottle.models import networks
 from cbottle.config.models import ModelConfigV1
+from earth2grid.healpix import PaddingBackends
 
 
 def get_model(
     config: ModelConfigV1,
     *,
-    use_apex_groupnorm: bool | None = None,
-    padding_backend=None,
-    in_place_operations: bool = True,
+    allow_second_order_derivatives: bool = False,
 ) -> torch.nn.Module:
+    if allow_second_order_derivatives:
+        use_apex_groupnorm = False
+        padding_backend = PaddingBackends.indexing
+        in_place_operations = False
+    else:
+        use_apex_groupnorm = True
+        padding_backend = PaddingBackends.cuda
+        in_place_operations = True
+
     if config.architecture == "unet_hpx64":
         precond_cls = networks.EDMPrecond
         if config.time_length > 1:
