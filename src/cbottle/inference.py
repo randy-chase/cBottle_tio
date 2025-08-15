@@ -102,11 +102,9 @@ class CBottle3d:
         path: str | list[str],
         separate_classifier_path: str | None = None,
         sigma_thresholds: tuple[float, ...] = (),
+        allow_second_order_derivatives: bool = False,
         **kwargs,
     ) -> "CBottle3d":
-        allow_second_order_derivatives = kwargs.pop(
-            "allow_second_order_derivatives", True
-        )
         net = MixtureOfExpertsDenoiser.from_pretrained(
             path,
             sigma_thresholds,
@@ -408,7 +406,6 @@ class CBottle3d:
         guidance_pixels: torch.Tensor | None = None,
         guidance_scale: float = 0.03,
         bf16=True,
-        post_process: bool = True,
     ):
         """
 
@@ -535,8 +532,9 @@ class CBottle3d:
                         self.sigma_max
                     ),  # Convert to int for type compatibility
                 )
-            if post_process:
-                out = self._post_process(out)
+
+            out = self._post_process(out)
+
             return out, self.coords
 
     def get_guidance_pixels(self, lons, lats) -> torch.Tensor:
@@ -830,7 +828,7 @@ class MixtureOfExpertsDenoiser(torch.nn.Module):
         path: str | list[str],
         sigma_thresholds: tuple[float, ...],
         *,
-        allow_second_order_derivatives: bool = True,
+        allow_second_order_derivatives: bool = False,
     ) -> "MixtureOfExpertsDenoiser":
         match path:
             case str():

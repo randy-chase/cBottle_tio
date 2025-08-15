@@ -17,6 +17,7 @@
 "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
 import dataclasses
+from dataclasses import dataclass
 import importlib
 import inspect
 import warnings
@@ -42,6 +43,7 @@ from cbottle.models.embedding import (
     FourierEmbedding,
     PositionalEmbedding,
 )
+
 if torch.cuda.is_available():
     try:
         apex_gn_module = importlib.import_module("apex.contrib.group_norm")
@@ -692,10 +694,9 @@ class UNetBlock(torch.nn.Module):
         self.attention = attention
         self.checkpoint = checkpoint
 
-        self.norm0 = group_norm_factory(
+        self.norm0 = factory.GroupNorm(
             num_channels=in_channels,
             eps=eps,
-            use_apex_gn=factory.use_apex_groupnorm,
             fused_act=True,
             act="silu",
         )
@@ -714,16 +715,14 @@ class UNetBlock(torch.nn.Module):
             **init,
         )
         if adaptive_scale:
-            self.norm1 = group_norm_factory(
+            self.norm1 = factory.GroupNorm(
                 num_channels=out_channels,
                 eps=eps,
-                use_apex_gn=factory.use_apex_groupnorm,
             )
         else:
-            self.norm1 = group_norm_factory(
+            self.norm1 = factory.GroupNorm(
                 num_channels=out_channels,
                 eps=eps,
-                use_apex_gn=factory.use_apex_groupnorm,
                 fused_act=True,
                 act="silu",
             )
@@ -810,10 +809,10 @@ class UNetBlock(torch.nn.Module):
         return x
 
 
+@dataclass
 class OriginalFactory:
-    def __init__(self, img_size: tuple[int, int], use_apex_groupnorm: bool = False):
-        self.img_size = img_size
-        self.use_apex_groupnorm = use_apex_groupnorm
+    img_size: tuple[int, int]
+    use_apex_groupnorm: bool = False
 
     def Conv2d(self, **kwargs):
         return Conv2d(**kwargs)
@@ -823,6 +822,15 @@ class OriginalFactory:
 
     def UNetBlock(self, **kwargs):
         return UNetBlock(factory=self, **kwargs)
+
+    def GroupNorm(self, num_channels: int, eps: float = 1e-5, **kwargs):
+        """Create a GroupNorm layer with factory's default parameters."""
+        return group_norm_factory(
+            num_channels=num_channels,
+            eps=eps,
+            use_apex_gn=self.use_apex_groupnorm,
+            **kwargs,
+        )
 
 
 class UnetBlockSpace(torch.nn.Module):
@@ -945,10 +953,8 @@ class TemporalAttention(torch.nn.Module):
         return self.proj(out).to(dtype)
 
 
+@dataclass
 class SpatialFactory(OriginalFactory):
-    def __init__(self, img_size: tuple[int, int], use_apex_groupnorm: bool = False):
-        super().__init__(img_size, use_apex_groupnorm)
-
     def Conv2d(self, up=False, down=False, **kwargs):
         if down:
             img_size = (k * 2 for k in self.img_size)
@@ -963,26 +969,31 @@ class SpatialFactory(OriginalFactory):
         return ApplySpace(super().Attention(**kwargs), self.img_size)
 
 
+@dataclass
 class HealPixFactory(OriginalFactory):
-    def __init__(
-        self,
-        img_size: tuple[int, int],
-        use_apex_groupnorm: bool = False,
-        padding_backend: PaddingBackends | None = None,
-        in_place_operations: bool = True,
-    ):
-        super().__init__(img_size, use_apex_groupnorm)
-        self.padding_backend = padding_backend
-        self.in_place_operations = in_place_operations
+    padding_backend: PaddingBackends | None = None
+    in_place_operations: bool = True
 
     def Conv2d(self, *args, **kwargs):
         # Add HealPix-specific arguments
-        kwargs["padding_backend"] = self.padding_backend
-        kwargs["in_place_operations"] = self.in_place_operations
-        return Conv2dHealpix(*args, **kwargs)
+        return Conv2dHealpix(
+            *args,
+            padding_backend=self.padding_backend,
+            in_place_operations=self.in_place_operations,
+            **kwargs,
+        )
 
     def Attention(self, **kwargs):
         return SpatialAttention(**kwargs)
+
+    def GroupNorm(self, num_channels: int, eps: float = 1e-5, **kwargs):
+        """Create a GroupNorm layer with factory's default parameters."""
+        return group_norm_factory(
+            num_channels=num_channels,
+            eps=eps,
+            use_apex_gn=self.use_apex_groupnorm,
+            **kwargs,
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -995,7 +1006,7 @@ class HealPixFactory(OriginalFactory):
 # https://github.com/NVIDIA/physicsnemo/issues/972
 
 
-@dataclasses.dataclass
+@dataclass
 class Output:
     out: torch.Tensor
     logits: torch.Tensor | None = None
@@ -1284,10 +1295,9 @@ class SongUNet(torch.nn.Module):
                         up=True,
                         resample_filter=resample_filter,
                     )
-                self.dec[f"{res}x{res}_aux_norm"] = group_norm_factory(
+                self.dec[f"{res}x{res}_aux_norm"] = factory.GroupNorm(
                     num_channels=cout,
                     eps=1e-6,
-                    use_apex_gn=use_apex_groupnorm,
                 )
                 self.dec[f"{res}x{res}_aux_conv"] = factory.Conv2d(
                     in_channels=cout,
@@ -1310,9 +1320,7 @@ class SongUNet(torch.nn.Module):
                     resample_filter=resample_filter,
                 ),
                 torch.nn.ReLU(),
-                group_norm_factory(
-                    num_channels=32, num_groups=8, use_apex_gn=use_apex_groupnorm
-                ),
+                factory.GroupNorm(num_channels=32, num_groups=8),
                 self.classifier_dropout,
                 factory.Conv2d(
                     in_channels=32,
