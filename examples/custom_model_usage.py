@@ -46,6 +46,11 @@ def example_single_model():
     except FileNotFoundError:
         print(f"Checkpoint file not found: {checkpoint_path}")
         print("Please update the checkpoint_path variable with your actual model path.")
+    except AttributeError as e:
+        print(f"Model loading error: {e}")
+        print("This usually means the checkpoint doesn't have the required batch_info.")
+    except Exception as e:
+        print(f"Unexpected error loading model: {e}")
 
 
 def example_moe_model():
@@ -76,6 +81,9 @@ def example_moe_model():
         print("MoE model loaded successfully!")
         print("Available variables:", model.batch_info.channels)
         
+    except AttributeError as e:
+        print(f"MoE model loading error: {e}")
+        print("This usually means the checkpoint doesn't have the required batch_info.")
     except Exception as e:
         print(f"Error loading MoE model: {e}")
 
@@ -108,6 +116,9 @@ def example_with_classifier():
         else:
             print("No classifier available.")
             
+    except AttributeError as e:
+        print(f"Model with classifier loading error: {e}")
+        print("This usually means the checkpoint doesn't have the required batch_info.")
     except Exception as e:
         print(f"Error loading model with classifier: {e}")
 
@@ -148,6 +159,9 @@ def example_integration_with_existing():
         print("Batch created successfully!")
         print("You can now use model.sample(dummy_batch) to generate data")
         
+    except AttributeError as e:
+        print(f"Integration example error: {e}")
+        print("This usually means the checkpoint doesn't have the required batch_info.")
     except Exception as e:
         print(f"Error in integration example: {e}")
 

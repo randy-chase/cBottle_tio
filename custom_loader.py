@@ -61,6 +61,10 @@ def load_custom_model(
         
         # Read the batch info (contains channel information)
         batch_info = c.read_batch_info()
+        
+        # Attach batch_info to the model so CBottle3d can access it
+        model.batch_info = batch_info
+        logging.info(f"Attached batch_info with {len(batch_info.channels)} channels: {batch_info.channels}")
     
     # Load separate classifier if provided
     separate_classifier = None
@@ -78,6 +82,10 @@ def load_custom_model(
                 .cuda()
                 .eval()
             )
+    
+    # Verify that the model has batch_info before creating CBottle3d
+    if not hasattr(model, 'batch_info') or model.batch_info is None:
+        raise AttributeError("Model does not have batch_info attribute. This is required for CBottle3d.")
     
     # Create the CBottle3d wrapper
     return cbottle.inference.CBottle3d(
@@ -136,6 +144,14 @@ def load_custom_moe_model(
         allow_second_order_derivatives=allow_second_order_derivatives
     )
     
+    # The MoE model should already have batch_info from from_pretrained
+    # but let's verify it exists
+    if not hasattr(moe_denoiser, 'batch_info') or moe_denoiser.batch_info is None:
+        # Fallback: load batch_info from the first checkpoint
+        with cbottle.checkpointing.Checkpoint(checkpoint_paths[0]) as c:
+            batch_info = c.read_batch_info()
+            moe_denoiser.batch_info = batch_info
+    
     # Load separate classifier if provided
     separate_classifier = None
     if separate_classifier_path:
@@ -152,6 +168,10 @@ def load_custom_moe_model(
                 .cuda()
                 .eval()
             )
+    
+    # Verify that the MoE model has batch_info before creating CBottle3d
+    if not hasattr(moe_denoiser, 'batch_info') or moe_denoiser.batch_info is None:
+        raise AttributeError("MoE model does not have batch_info attribute. This is required for CBottle3d.")
     
     # Create the CBottle3d wrapper
     return cbottle.inference.CBottle3d(
