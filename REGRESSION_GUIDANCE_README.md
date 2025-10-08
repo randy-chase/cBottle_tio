@@ -360,18 +360,22 @@ print(f"Data assimilation complete! Output shape: {output.shape}")
    - **Cause**: The `batch_info` property is read-only and cannot be modified after model creation
    - **Solution**: This is now automatically handled by the `custom_variables` parameter. The fix sets the correct `batch_info` during model loading instead of trying to modify it afterward.
 
-3. **"Regression guidance not set"**
+3. **Condition Tensor Shape Error**: `RuntimeError: Sizes of tensors must match except in dimension 1. Expected size 0 but got size 1 for tensor number 1 in the list.`
+   - **Cause**: The condition tensor has the wrong number of channels for the model's configuration
+   - **Solution**: The fix automatically detects the model's `condition_channels` from the checkpoint and creates the correct condition tensor shape.
+
+4. **"Regression guidance not set"**
    - Make sure to call `model.set_regression_guidance()` before sampling
 
-4. **"Variable not found in batch_info"**
+5. **"Variable not found in batch_info"**
    - Check that your observation variables match the model's variable names
    - Use `model.batch_info.channels` to see available variables
 
-5. **Shape mismatches**
+6. **Shape mismatches**
    - Ensure observation data shape matches [num_obs, num_variables]
    - Check that observation_locations are valid pixel indices
 
-6. **Memory issues**
+7. **Memory issues**
    - Reduce the number of observations
    - Use smaller guidance_scale values
    - Enable gradient checkpointing

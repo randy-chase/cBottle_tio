@@ -256,12 +256,13 @@ def create_custom_batch_info(variables: List[str]) -> 'BatchInfo':
     )
 
 
-def create_synthetic_batch_with_channels(num_channels: int) -> dict:
+def create_synthetic_batch_with_channels(num_channels: int, condition_channels: int = 0) -> dict:
     """
     Create a synthetic batch with the specified number of channels.
     
     Args:
-        num_channels: Number of channels in the batch
+        num_channels: Number of channels in the target
+        condition_channels: Number of channels in the condition (0 for no conditioning)
         
     Returns:
         Synthetic batch dictionary
@@ -269,13 +270,13 @@ def create_synthetic_batch_with_channels(num_channels: int) -> dict:
     # Create synthetic data with the correct number of channels
     batch = {
         'target': torch.randn(1, num_channels, 1, 12288),  # Standard cBottle shape
-        'condition': torch.randn(1, 1, 1, 12288),  # SST condition
+        'condition': torch.randn(1, condition_channels, 1, 12288) if condition_channels > 0 else torch.zeros(1, 0, 1, 12288),  # Condition tensor
         'labels': torch.zeros(1, 0),  # No labels
         'second_of_day': torch.tensor([43200]),  # Noon
         'day_of_year': torch.tensor([180]),  # Mid-year
     }
     
-    print(f"Created synthetic batch with {num_channels} channels")
+    print(f"Created synthetic batch with {num_channels} target channels and {condition_channels} condition channels")
     return batch
 
 
@@ -320,11 +321,18 @@ def load_custom_model_with_custom_batch_info(
             allow_second_order_derivatives=allow_second_order_derivatives
         ).cuda().eval()
         
+        # Get the model configuration to determine condition_channels
+        model_config = c.read_model_config()
+        condition_channels = getattr(model_config, 'condition_channels', 0)
+        
         # Create custom batch_info with the specified variables
         custom_batch_info = create_custom_batch_info(custom_variables)
         
         # Attach custom batch_info to the model
         model.batch_info = custom_batch_info
+        
+        # Store condition_channels for later use
+        model.condition_channels = condition_channels
     
     # Create regression-guided version
     regression_model = RegressionGuidedCBottle3d(
@@ -389,8 +397,12 @@ def quick_regression_guidance_setup(
             print(f"Using custom variable configuration with {len(custom_variables)} channels")
             print(f"Variables: {custom_variables}")
             
+            # Get condition_channels from the model
+            condition_channels = getattr(model.net, 'condition_channels', 0)
+            print(f"Model expects {condition_channels} condition channels")
+            
             # Create a synthetic batch with the correct number of channels
-            batch = create_synthetic_batch_with_channels(len(custom_variables))
+            batch = create_synthetic_batch_with_channels(len(custom_variables), condition_channels)
         else:
             print(f"Using default AMIP configuration with {len(model.batch_info.channels)} channels")
         
@@ -404,19 +416,24 @@ def quick_regression_guidance_setup(
     else:
         # Use synthetic data
         if custom_variables is not None:
+            # Get condition_channels from the model
+            condition_channels = getattr(model.net, 'condition_channels', 0)
+            print(f"Model expects {condition_channels} condition channels")
+            
             # Create synthetic batch with custom number of channels
-            batch = create_synthetic_batch_with_channels(len(custom_variables))
+            batch = create_synthetic_batch_with_channels(len(custom_variables), condition_channels)
         else:
             # Create synthetic batch with default channels
             batch_size = 1
             time_length = model.time_length
             num_channels = len(model.batch_info.channels)
             num_pixels = model.net.domain.numel()
+            condition_channels = getattr(model.net, 'condition_channels', 0)
             
             batch = {
                 "target": torch.randn(batch_size, num_channels, time_length, num_pixels),
                 "labels": torch.zeros(batch_size, 2),
-                "condition": torch.randn(batch_size, 0, time_length, num_pixels),
+                "condition": torch.randn(batch_size, condition_channels, time_length, num_pixels) if condition_channels > 0 else torch.zeros(batch_size, 0, time_length, num_pixels),
                 "second_of_day": torch.randint(0, 86400, (batch_size,)),
                 "day_of_year": torch.randint(1, 366, (batch_size,))
             }
