@@ -41,6 +41,38 @@ model, batch = cbottle.quick_regression_guidance_setup(
 output, coords = model.sample(batch, seed=42)
 ```
 
+### Method 1b: Custom Variables (Fix Channel Mismatch)
+
+If you get a `RuntimeError: The size of tensor a (53) must match the size of tensor b (45)` error, your model has a different variable configuration than the default. Use the `custom_variables` parameter:
+
+```python
+import cbottle
+
+# Your custom model's variables
+custom_variables = [
+    'U1000', 'U850', 'U700', 'U500', 'U300', 'U200', 'U50', 'U10',
+    'V1000', 'V850', 'V700', 'V500', 'V300', 'V200', 'V50', 'V10',
+    'T1000', 'T850', 'T700', 'T500', 'T300', 'T200', 'T50', 'T10',
+    'Z1000', 'Z850', 'Z700', 'Z500', 'Z300', 'Z200', 'Z50', 'Z10',
+    'Q1000', 'Q850', 'Q700', 'Q500', 'Q300', 'Q200', 'Q50', 'Q10',
+    'tcwv', 'cllvi', 'clivi', 'tas', 'uas', 'vas', 'rlut', 'rsut',
+    'pres_msl', 'pr', 'rsds', 'sst', 'sic'
+]
+
+# Quick setup with custom variables
+model, batch = cbottle.quick_regression_guidance_setup(
+    checkpoint_path="/path/to/your/model.checkpoint",
+    observation_variables=['T850', 'T500', 'T300'],
+    num_obs=100,
+    guidance_scale=1.0,
+    use_amip=True,
+    custom_variables=custom_variables  # This fixes the channel mismatch!
+)
+
+# Perform data assimilation
+output, coords = model.sample(batch, seed=42)
+```
+
 ### Method 2: Manual Setup with AMIP Dataset
 
 ```python
@@ -304,18 +336,38 @@ print(f"Data assimilation complete! Output shape: {output.shape}")
 
 ### Common Issues
 
-1. **"Regression guidance not set"**
+1. **Channel Mismatch Error**: `RuntimeError: The size of tensor a (53) must match the size of tensor b (45)`
+   - **Cause**: Your custom model has a different variable configuration than the default
+   - **Solution**: Use the `custom_variables` parameter in `quick_regression_guidance_setup()`:
+   ```python
+   custom_variables = [
+       'U1000', 'U850', 'U700', 'U500', 'U300', 'U200', 'U50', 'U10',
+       'V1000', 'V850', 'V700', 'V500', 'V300', 'V200', 'V50', 'V10',
+       'T1000', 'T850', 'T700', 'T500', 'T300', 'T200', 'T50', 'T10',
+       'Z1000', 'Z850', 'Z700', 'Z500', 'Z300', 'Z200', 'Z50', 'Z10',
+       'Q1000', 'Q850', 'Q700', 'Q500', 'Q300', 'Q200', 'Q50', 'Q10',
+       'tcwv', 'cllvi', 'clivi', 'tas', 'uas', 'vas', 'rlut', 'rsut',
+       'pres_msl', 'pr', 'rsds', 'sst', 'sic'
+   ]
+   
+   model, batch = cbottle.quick_regression_guidance_setup(
+       checkpoint_path="/path/to/your/model.checkpoint",
+       custom_variables=custom_variables  # This fixes the mismatch!
+   )
+   ```
+
+2. **"Regression guidance not set"**
    - Make sure to call `model.set_regression_guidance()` before sampling
 
-2. **"Variable not found in batch_info"**
+3. **"Variable not found in batch_info"**
    - Check that your observation variables match the model's variable names
    - Use `model.batch_info.channels` to see available variables
 
-3. **Shape mismatches**
+4. **Shape mismatches**
    - Ensure observation data shape matches [num_obs, num_variables]
    - Check that observation_locations are valid pixel indices
 
-4. **Memory issues**
+5. **Memory issues**
    - Reduce the number of observations
    - Use smaller guidance_scale values
    - Enable gradient checkpointing

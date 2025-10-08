@@ -237,12 +237,55 @@ def create_synthetic_observations(
     return observation_data, observation_locations
 
 
+def create_custom_batch_info(variables: List[str]) -> 'BatchInfo':
+    """
+    Create a BatchInfo object for a custom model with the specified variables.
+    
+    Args:
+        variables: List of variable names in the order they appear in the model
+        
+    Returns:
+        BatchInfo object with the correct channel mapping
+    """
+    from .datasets.base import BatchInfo, TimeUnit
+    
+    return BatchInfo(
+        channels=variables,
+        time_step=1,
+        time_unit=TimeUnit.HOUR
+    )
+
+
+def create_synthetic_batch_with_channels(num_channels: int) -> dict:
+    """
+    Create a synthetic batch with the specified number of channels.
+    
+    Args:
+        num_channels: Number of channels in the batch
+        
+    Returns:
+        Synthetic batch dictionary
+    """
+    # Create synthetic data with the correct number of channels
+    batch = {
+        'target': torch.randn(1, num_channels, 1, 12288),  # Standard cBottle shape
+        'condition': torch.randn(1, 1, 1, 12288),  # SST condition
+        'labels': torch.zeros(1, 0),  # No labels
+        'second_of_day': torch.tensor([43200]),  # Noon
+        'day_of_year': torch.tensor([180]),  # Mid-year
+    }
+    
+    print(f"Created synthetic batch with {num_channels} channels")
+    return batch
+
+
 def quick_regression_guidance_setup(
     checkpoint_path: str,
     observation_variables: List[str] = ['T850', 'T500', 'T300'],
     num_obs: int = 100,
     guidance_scale: float = 1.0,
-    use_amip: bool = True
+    use_amip: bool = True,
+    custom_variables: Optional[List[str]] = None
 ) -> Tuple[object, dict]:
     """
     Quick setup for regression guidance with minimal code.
@@ -253,6 +296,7 @@ def quick_regression_guidance_setup(
         num_obs: Number of observations
         guidance_scale: Guidance strength
         use_amip: Whether to use AMIP dataset or synthetic data
+        custom_variables: List of all variables in your custom model (if different from default)
         
     Returns:
         model: Loaded model with regression guidance configured
@@ -269,6 +313,23 @@ def quick_regression_guidance_setup(
     if use_amip:
         # Use AMIP dataset
         batch, ds = load_amip_batch()
+        
+        # If custom variables are provided, create a custom batch_info
+        if custom_variables is not None:
+            print(f"Using custom variable configuration with {len(custom_variables)} channels")
+            print(f"Variables: {custom_variables}")
+            
+            # Create custom batch_info
+            custom_batch_info = create_custom_batch_info(custom_variables)
+            
+            # Update the model's batch_info
+            model.batch_info = custom_batch_info
+            
+            # Create a synthetic batch with the correct number of channels
+            batch = create_synthetic_batch_with_channels(len(custom_variables))
+        else:
+            print(f"Using default AMIP configuration with {len(model.batch_info.channels)} channels")
+        
         setup_regression_guidance_with_amip(
             model=model,
             amip_batch=batch,
@@ -278,6 +339,28 @@ def quick_regression_guidance_setup(
         )
     else:
         # Use synthetic data
+        if custom_variables is not None:
+            # Create synthetic batch with custom number of channels
+            batch = create_synthetic_batch_with_channels(len(custom_variables))
+            
+            # Create custom batch_info
+            custom_batch_info = create_custom_batch_info(custom_variables)
+            model.batch_info = custom_batch_info
+        else:
+            # Create synthetic batch with default channels
+            batch_size = 1
+            time_length = model.time_length
+            num_channels = len(model.batch_info.channels)
+            num_pixels = model.net.domain.numel()
+            
+            batch = {
+                "target": torch.randn(batch_size, num_channels, time_length, num_pixels),
+                "labels": torch.zeros(batch_size, 2),
+                "condition": torch.randn(batch_size, 0, time_length, num_pixels),
+                "second_of_day": torch.randint(0, 86400, (batch_size,)),
+                "day_of_year": torch.randint(1, 366, (batch_size,))
+            }
+        
         observation_data, observation_locations = create_synthetic_observations(
             observation_variables=observation_variables,
             num_obs=num_obs
@@ -290,20 +373,6 @@ def quick_regression_guidance_setup(
             observation_uncertainty=0.1,
             guidance_scale=guidance_scale,
         )
-        
-        # Create dummy batch
-        batch_size = 1
-        time_length = model.time_length
-        num_channels = len(model.batch_info.channels)
-        num_pixels = model.net.domain.numel()
-        
-        batch = {
-            "target": torch.randn(batch_size, num_channels, time_length, num_pixels),
-            "labels": torch.zeros(batch_size, 2),
-            "condition": torch.randn(batch_size, 0, time_length, num_pixels),
-            "second_of_day": torch.randint(0, 86400, (batch_size,)),
-            "day_of_year": torch.randint(1, 366, (batch_size,))
-        }
     
     print("✅ Quick setup complete!")
     return model, batch
