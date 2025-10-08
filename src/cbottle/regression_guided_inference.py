@@ -232,23 +232,34 @@ def load_custom_model_with_regression_guidance(
     Returns:
         RegressionGuidedCBottle3d: Loaded model ready for regression-guided inference
     """
+    import os
     from . import checkpointing
     
-    # Load the base model using the checkpointing system
-    base_model = checkpointing.load_checkpoint(checkpoint_path)
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+    
+    # Load the model using the checkpointing system
+    with checkpointing.Checkpoint(checkpoint_path) as c:
+        # Read the model configuration and create the model
+        model = c.read_model(
+            map_location=None,
+            allow_second_order_derivatives=allow_second_order_derivatives
+        ).cuda().eval()
+        
+        # Read the batch info (contains channel information)
+        batch_info = c.read_batch_info()
+        
+        # Attach batch_info to the model
+        model.batch_info = batch_info
     
     # Create regression-guided version
     regression_model = RegressionGuidedCBottle3d(
-        net=base_model.net,
-        batch_info=base_model.batch_info,
-        coords=base_model.coords,
-        sigma_min=base_model.sigma_min,
-        sigma_max=base_model.sigma_max,
-        num_steps=base_model.num_steps,
-        separate_classifier=base_model.separate_classifier,
-        classifier_grid=base_model.classifier_grid,
-        icon_mask=base_model.icon_mask,
-        era5_mask=base_model.era5_mask,
+        net=model,
+        separate_classifier=None,  # No separate classifier for regression guidance
+        sigma_min=sigma_min,
+        sigma_max=sigma_max,
+        num_steps=num_steps,
+        **kwargs
     )
     
     print(f"Loaded custom model with regression guidance support: {model_name or 'unnamed'}")
