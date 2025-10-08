@@ -26,11 +26,10 @@ The regression guidance system constrains the diffusion sampling process to matc
 ### Method 1: Using AMIP Dataset (Recommended)
 
 ```python
-from regression_guided_inference import load_custom_model_with_regression_guidance
-from amip_regression_utils import quick_regression_guidance_setup
+import cbottle
 
 # Quick setup with AMIP dataset
-model, batch = quick_regression_guidance_setup(
+model, batch = cbottle.quick_regression_guidance_setup(
     checkpoint_path="/path/to/your/model.checkpoint",
     observation_variables=['T850', 'T500', 'T300'],
     num_obs=100,
@@ -45,12 +44,11 @@ output, coords = model.sample(batch, seed=42)
 ### Method 2: Manual Setup with AMIP Dataset
 
 ```python
-from regression_guided_inference import load_custom_model_with_regression_guidance
+import cbottle
 from cbottle.datasets.dataset_3d import get_dataset
-from amip_regression_utils import setup_regression_guidance_with_amip
 
 # 1. Load your model
-model = load_custom_model_with_regression_guidance(
+model = cbottle.load_custom_model_with_regression_guidance(
     checkpoint_path="/path/to/your/model.checkpoint",
     model_name="my-weather-model"
 )
@@ -61,7 +59,7 @@ loader = torch.utils.data.DataLoader(ds, batch_size=1)
 batch = next(iter(loader))
 
 # 3. Set up regression guidance using AMIP data
-setup_regression_guidance_with_amip(
+cbottle.setup_regression_guidance_with_amip(
     model=model,
     amip_batch=batch,
     observation_variables=['T850', 'T500', 'T300'],
@@ -77,11 +75,11 @@ output, coords = model.sample(batch)
 ### Method 3: Manual Setup with Synthetic Data
 
 ```python
-from regression_guided_inference import load_custom_model_with_regression_guidance
+import cbottle
 import torch
 
 # 1. Load your model
-model = load_custom_model_with_regression_guidance(
+model = cbottle.load_custom_model_with_regression_guidance(
     checkpoint_path="/path/to/your/model.checkpoint",
     model_name="my-weather-model"
 )

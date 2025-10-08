@@ -14,5 +14,15 @@
 # limitations under the License.
 
 from .inference import SuperResolutionModel
+from .regression_guided_inference import RegressionGuidedCBottle3d, load_custom_model_with_regression_guidance
+from .regression_guidance import RegressionGuidance
+from .amip_regression_utils import quick_regression_guidance_setup, setup_regression_guidance_with_amip
 
-__all__ = ["SuperResolutionModel"]
+__all__ = [
+    "SuperResolutionModel",
+    "RegressionGuidedCBottle3d", 
+    "load_custom_model_with_regression_guidance",
+    "RegressionGuidance",
+    "quick_regression_guidance_setup",
+    "setup_regression_guidance_with_amip"
+]
