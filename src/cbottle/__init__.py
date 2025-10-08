@@ -16,12 +16,17 @@
 from .inference import SuperResolutionModel
 from .regression_guided_inference import RegressionGuidedCBottle3d, load_custom_model_with_regression_guidance
 from .regression_guidance import RegressionGuidance
-from .amip_regression_utils import quick_regression_guidance_setup, setup_regression_guidance_with_amip
+from .amip_regression_utils import (
+    quick_regression_guidance_setup, 
+    setup_regression_guidance_with_amip,
+    load_custom_model_with_custom_batch_info
+)
 
 __all__ = [
     "SuperResolutionModel",
-    "RegressionGuidedCBottle3d", 
+    "RegressionGuidedCBottle3d",
     "load_custom_model_with_regression_guidance",
+    "load_custom_model_with_custom_batch_info",
     "RegressionGuidance",
     "quick_regression_guidance_setup",
     "setup_regression_guidance_with_amip"

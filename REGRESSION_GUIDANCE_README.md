@@ -356,18 +356,22 @@ print(f"Data assimilation complete! Output shape: {output.shape}")
    )
    ```
 
-2. **"Regression guidance not set"**
+2. **Batch Info Property Error**: `AttributeError: property 'batch_info' of 'RegressionGuidedCBottle3d' object has no setter`
+   - **Cause**: The `batch_info` property is read-only and cannot be modified after model creation
+   - **Solution**: This is now automatically handled by the `custom_variables` parameter. The fix sets the correct `batch_info` during model loading instead of trying to modify it afterward.
+
+3. **"Regression guidance not set"**
    - Make sure to call `model.set_regression_guidance()` before sampling
 
-3. **"Variable not found in batch_info"**
+4. **"Variable not found in batch_info"**
    - Check that your observation variables match the model's variable names
    - Use `model.batch_info.channels` to see available variables
 
-4. **Shape mismatches**
+5. **Shape mismatches**
    - Ensure observation data shape matches [num_obs, num_variables]
    - Check that observation_locations are valid pixel indices
 
-5. **Memory issues**
+6. **Memory issues**
    - Reduce the number of observations
    - Use smaller guidance_scale values
    - Enable gradient checkpointing

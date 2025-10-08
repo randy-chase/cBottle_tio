@@ -55,7 +55,7 @@ def main():
         print("    'pres_msl', 'pr', 'rsds', 'sst', 'sic'")
         print("]")
         print("")
-        print("# Quick setup with custom variables")
+        print("# Quick setup with custom variables (FIXED!)")
         print("model, batch = cbottle.quick_regression_guidance_setup(")
         print("    checkpoint_path='/path/to/your/model.checkpoint',")
         print("    observation_variables=['T850', 'T500', 'T300'],")
@@ -68,6 +68,9 @@ def main():
         print("# Perform data assimilation")
         print("output, coords = model.sample(batch, seed=42)")
         print("```")
+        print("")
+        print("The fix handles the 'batch_info' property issue by setting it correctly")
+        print("during model loading instead of trying to modify it after creation.")
         return
     
     try:

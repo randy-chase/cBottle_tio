@@ -279,6 +279,67 @@ def create_synthetic_batch_with_channels(num_channels: int) -> dict:
     return batch
 
 
+def load_custom_model_with_custom_batch_info(
+    checkpoint_path: str,
+    custom_variables: List[str],
+    model_name: Optional[str] = None,
+    sigma_min: float = 0.02,
+    sigma_max: float = 200.0,
+    num_steps: int = 18,
+    allow_second_order_derivatives: bool = False,
+    **kwargs
+) -> 'RegressionGuidedCBottle3d':
+    """
+    Load a custom model with custom batch_info to handle variable configuration mismatches.
+    
+    Args:
+        checkpoint_path: Path to your custom checkpoint file (.checkpoint)
+        custom_variables: List of variable names in the order they appear in the model
+        model_name: Optional name for the model (for logging)
+        sigma_min: Minimum noise sigma for diffusion sampling
+        sigma_max: Maximum noise sigma for diffusion sampling  
+        num_steps: Number of sampling steps
+        allow_second_order_derivatives: Whether to allow second order derivatives
+        **kwargs: Additional arguments passed to CBottle3d
+        
+    Returns:
+        RegressionGuidedCBottle3d: Loaded model with custom batch_info
+    """
+    import os
+    from . import checkpointing
+    from .regression_guided_inference import RegressionGuidedCBottle3d
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+    
+    # Load the model using the checkpointing system
+    with checkpointing.Checkpoint(checkpoint_path) as c:
+        # Read the model configuration and create the model
+        model = c.read_model(
+            map_location=None,
+            allow_second_order_derivatives=allow_second_order_derivatives
+        ).cuda().eval()
+        
+        # Create custom batch_info with the specified variables
+        custom_batch_info = create_custom_batch_info(custom_variables)
+        
+        # Attach custom batch_info to the model
+        model.batch_info = custom_batch_info
+    
+    # Create regression-guided version
+    regression_model = RegressionGuidedCBottle3d(
+        net=model,
+        separate_classifier=None,  # No separate classifier for regression guidance
+        sigma_min=sigma_min,
+        sigma_max=sigma_max,
+        num_steps=num_steps,
+        **kwargs
+    )
+    
+    print(f"Loaded custom model with {len(custom_variables)} variables: {model_name or 'unnamed'}")
+    return regression_model
+
+
 def quick_regression_guidance_setup(
     checkpoint_path: str,
     observation_variables: List[str] = ['T850', 'T500', 'T300'],
@@ -305,25 +366,28 @@ def quick_regression_guidance_setup(
     print("Quick regression guidance setup...")
     
     # Load model
-    model = load_custom_model_with_regression_guidance(
-        checkpoint_path=checkpoint_path,
-        model_name="weather-model"
-    )
+    if custom_variables is not None:
+        # Use custom batch_info loading for custom variables
+        model = load_custom_model_with_custom_batch_info(
+            checkpoint_path=checkpoint_path,
+            custom_variables=custom_variables,
+            model_name="weather-model"
+        )
+    else:
+        # Use standard loading for default variables
+        model = load_custom_model_with_regression_guidance(
+            checkpoint_path=checkpoint_path,
+            model_name="weather-model"
+        )
     
     if use_amip:
         # Use AMIP dataset
         batch, ds = load_amip_batch()
         
-        # If custom variables are provided, create a custom batch_info
+        # If custom variables are provided, create a synthetic batch with correct channels
         if custom_variables is not None:
             print(f"Using custom variable configuration with {len(custom_variables)} channels")
             print(f"Variables: {custom_variables}")
-            
-            # Create custom batch_info
-            custom_batch_info = create_custom_batch_info(custom_variables)
-            
-            # Update the model's batch_info
-            model.batch_info = custom_batch_info
             
             # Create a synthetic batch with the correct number of channels
             batch = create_synthetic_batch_with_channels(len(custom_variables))
@@ -342,10 +406,6 @@ def quick_regression_guidance_setup(
         if custom_variables is not None:
             # Create synthetic batch with custom number of channels
             batch = create_synthetic_batch_with_channels(len(custom_variables))
-            
-            # Create custom batch_info
-            custom_batch_info = create_custom_batch_info(custom_variables)
-            model.batch_info = custom_batch_info
         else:
             # Create synthetic batch with default channels
             batch_size = 1
